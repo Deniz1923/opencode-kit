@@ -1,0 +1,70 @@
+{
+  "formatVersion": 1,
+  "name": "Deniz agents",
+  "namespace": "deniz",
+  "version": "0.2.0",
+  "agents": [
+    {
+      "file": "agents/build.md",
+      "id": "build",
+      "access": {
+        "profile": "workspace-write",
+        "escape": "ask"
+      }
+    },
+    {
+      "file": "agents/chat.md",
+      "id": "chat",
+      "access": {
+        "profile": "workspace-write",
+        "escape": "ask"
+      }
+    },
+    {
+      "file": "agents/plan.md",
+      "id": "plan",
+      "access": {
+        "profile": "planner",
+        "escape": "deny"
+      }
+    },
+    {
+      "file": "agents/explore.md",
+      "id": "explore",
+      "access": {
+        "profile": "read-only",
+        "escape": "deny"
+      }
+    },
+    {
+      "file": "agents/code-reviewer.md",
+      "id": "code-reviewer",
+      "access": {
+        "profile": "read-only",
+        "escape": "deny"
+      }
+    },
+    {
+      "file": "agents/debugger.md",
+      "id": "debugger",
+      "access": {
+        "profile": "read-only",
+        "escape": "deny"
+      }
+    },
+    {
+      "file": "agents/test-engineer.md",
+      "id": "test-engineer",
+      "access": {
+        "profile": "read-only",
+        "escape": "ask"
+      }
+    }
+  ],
+  "requires": {
+    "todo": true
+  },
+  "settings": {
+    "default_agent": "build"
+  }
+}

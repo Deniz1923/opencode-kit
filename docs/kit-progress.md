@@ -10,7 +10,7 @@ Preflight interfaces: trusted policy -> plugin and composer; validated agent dat
 
 - Task 1: complete. Trusted profiles, arbitrary agent identities, native edit scopes, explicit terminal/escape denial and safe unknown-agent fallback implemented. RED tests observed; `npm test` passes 31/31. Migration idempotence regression fixed at its undefined prompt-field source.
 - Task 2: complete. Planner output roots are prepared inside bwrap, checked for symlinks, and mounted from pinned directory descriptors. Source and nested Git metadata remain read-only. RED tests observed; `npm test` passes 34/34.
-- Task 3: pending.
+- Task 3: complete. Validated native packs, explicit conflict choices, renamed references/profiles and JSONC-preserving composition implemented. Optional Deniz agents contain prompt data only. RED tests observed; full suite passes 45/45.
 - Task 4: pending.
 - Task 5: pending.
 
