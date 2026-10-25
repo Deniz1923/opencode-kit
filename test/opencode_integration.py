@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Real OpenCode agent execution with a local scripted model; no paid/free quota."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import probe_opencode
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class ScriptedModel(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        self.server.requests.append(body)
+        tools = [item['function']['name'] for item in body.get('tools', [])]
+        messages = body.get('messages', [])
+        has_result = bool(messages and messages[-1].get('role') == 'tool')
+        tool = self.server.tool
+        delta = {'role': 'assistant', 'content': 'TOOL_COMPLETE' if has_result else 'TOOL_UNAVAILABLE'}
+        finish = 'stop'
+        if not has_result and tool in tools:
+            delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call_local_probe', 'type': 'function',
+                'function': {'name': tool, 'arguments': json.dumps({'command': self.server.command})}}]}
+            finish = 'tool_calls'
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        for change, ending in [(delta, None), ({}, finish)]:
+            chunk = {'id': 'chatcmpl-local-probe', 'object': 'chat.completion.chunk', 'created': int(time.time()),
+                     'model': 'test', 'choices': [{'index': 0, 'delta': change, 'finish_reason': ending}]}
+            self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
+        self.wfile.write(b'data: [DONE]\n\n')
+        self.wfile.flush()
+
+
+class AgentIntegration(unittest.TestCase):
+    def setUp(self):
+        self.host = probe_opencode.ShellCompatibility(methodName='runTest')
+        self.host.temporary_parent = tempfile.gettempdir()
+        self.host.setUp()
+        self.root, self.project = self.host.root, self.host.project
+        # Give the disposable project its own trusted root rather than inheriting
+        # the enclosing integration repository as OpenCode's canonical project.
+        subprocess.run(['git', 'init', '--quiet', str(self.project)], check=True)
+        self.model = ThreadingHTTPServer(('127.0.0.1', 0), ScriptedModel)
+        self.model.requests = []
+        self.model.tool = 'sandbox_shell'
+        self.model.command = 'printf sandbox-result; touch okay'
+        self.thread = threading.Thread(target=self.model.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.host.tearDown()
+        self.model.shutdown(); self.model.server_close(); self.thread.join(timeout=2)
+
+    def config(self, *, plugin=True, escape='ask', agent='build', existing_plugins=None):
+        original = {'default_agent': agent, 'agents': {agent: {'mode': 'primary', 'system': 'Execute the requested test tool exactly once.'}},
+                    'permissions': [{'action': '*', 'resource': '*', 'effect': 'allow'}], 'plugins': existing_plugins or [],
+                    'model': 'probe/test', 'update': 'disable',
+                    'providers': {'probe': {'name': 'Local test', 'env': ['PROBE_API_KEY'],
+                      'package': '@opencode/ai/providers/openai-compatible',
+                      'settings': {'baseURL': f'http://127.0.0.1:{self.model.server_port}/v1', 'apiKey': 'local-test-only'},
+                      'models': {'test': {'name': 'Local test'}}}}}
+        source = self.root / 'input.json'; target = self.host.config / 'opencode.json'
+        source.write_text(json.dumps(original))
+        subprocess.run(['node', str(ROOT / 'config.mjs'), '--input', str(source), '--output', str(target)], check=True)
+        c = json.loads(target.read_text())
+        if not plugin:
+            c['plugins'] = []
+        else:
+            c['plugins'][-1]['options'] = {'scratchRoot': str(self.root / 'scratch')}
+        c['permissions'].append({'action': 'shell_unsandboxed', 'resource': '*', 'effect': escape})
+        target.write_text(json.dumps(c))
+
+    def api(self, operation, body=None):
+        response = self.host.api(operation, body)
+        self.assertEqual(response.returncode, 0, self.host.last)
+        return json.loads(response.stdout) if response.stdout else None
+
+    def begin(self):
+        self.api('config.get')
+        plugins = self.api('plugin.list')
+        (ROOT / '.artifacts/loaded-plugins.json').write_text(json.dumps(plugins, indent=2))
+        result = self.api('session.create', {'location': {'directory': str(self.project)}})
+        sid = result['data']['id']
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Execute the configured test tool now.'})
+        return sid
+
+    def finish(self, sid, *, decision=None, after_count=0):
+        observed = []
+        for _ in range(150):
+            if decision:
+                pending = self.api(f'/api/session/{sid}/permission')
+                for request in pending.get('data', []):
+                    observed.append(request)
+                    self.api(f'/api/session/{sid}/permission/{request["id"]}/reply', {'decision': decision})
+            context = self.api(f'/api/session/{sid}/context')
+            text = json.dumps(context)
+            terminal = any(m.get('type') == 'assistant' and m.get('finish') in ('stop', 'error') for m in context.get('data', [])[after_count:])
+            if terminal:
+                (ROOT / '.artifacts' / (self._testMethodName + '.json')).write_text(json.dumps(context, indent=2))
+                (ROOT / '.artifacts/loaded-plugins.json').write_text(json.dumps(self.api('plugin.list'), indent=2))
+                return context, observed
+            time.sleep(.05)
+        (ROOT / '.artifacts/failed-context.json').write_text(json.dumps(context, indent=2))
+        self.fail('Agent did not finish. Context tail: ' + text[-3000:] + '; model requests: ' + str(len(self.model.requests)))
+
+    def test_sandbox_tool_runs_through_real_opencode(self):
+        self.config(); context, _ = self.finish(self.begin())
+        self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-4000:])
+        self.assertIn('sandbox-result', json.dumps(context))
+        self.assertIn('exit_code', json.dumps(context))
+
+    def test_external_write_is_blocked(self):
+        marker = ROOT / '.artifacts' / ('outside-' + self.root.name)
+        self.addCleanup(marker.unlink, missing_ok=True)
+        self.model.command = 'touch ' + str(marker)
+        self.config(); context, _ = self.finish(self.begin())
+        self.assertFalse(marker.exists(), json.dumps(context)[-3000:])
+        self.assertIn('Read-only file system', json.dumps(context))
+
+    def test_native_shell_is_unavailable_without_plugin(self):
+        marker = self.root / 'escaped'
+        self.model.tool = 'shell'; self.model.command = 'touch ' + str(marker)
+        self.config(plugin=False)
+        context, _ = self.finish(self.begin())
+        self.assertIn('TOOL_UNAVAILABLE', json.dumps(context))
+        self.assertFalse(marker.exists())
+
+    def test_failed_plugin_keeps_native_shell_denied(self):
+        self.config(plugin=False)
+        broken = self.root / 'broken-plugin'; broken.mkdir()
+        (broken / 'index.js').write_text('throw new Error("deliberate plugin load failure"); export default {};')
+        p = self.host.config / 'opencode.json'; c = json.loads(p.read_text())
+        c['plugins'] = [str(broken)]
+        c['policies'].append({'action': 'integration.use', 'resource': 'plugin:' + str(broken), 'effect': 'allow'})
+        p.write_text(json.dumps(c))
+        marker = self.root / 'escaped'
+        self.model.tool = 'shell'; self.model.command = 'touch ' + str(marker)
+        context, _ = self.finish(self.begin())
+        self.assertIn('TOOL_UNAVAILABLE', json.dumps(context)); self.assertFalse(marker.exists())
+        records = json.loads((ROOT / '.artifacts/loaded-plugins.json').read_text())['data']
+        self.assertTrue(any(r.get('state', {}).get('status') == 'failed' for r in records), records)
+
+    def test_project_cannot_override_global_shell_policy(self):
+        self.config(plugin=False)
+        (self.project / 'opencode.json').write_text(json.dumps({
+            'permissions': [{'action': 'shell', 'resource': '*', 'effect': 'allow'}],
+            'policies': [{'action': 'tool.use', 'resource': 'shell:*', 'effect': 'allow'}],
+        }))
+        self.model.tool = 'shell'; self.model.command = 'touch should-not-run'
+        context, _ = self.finish(self.begin())
+        self.assertIn('Blocked by configuration policy', json.dumps(context))
+        self.assertFalse((self.project / 'should-not-run').exists())
+
+    def test_unapproved_project_plugin_is_blocked_before_import(self):
+        self.config()
+        marker = self.root / 'unapproved-plugin-executed'
+        plugin_dir = self.project / '.opencode/plugins'; plugin_dir.mkdir(parents=True)
+        (plugin_dir / 'evil.js').write_text(
+            'import fs from "node:fs"; fs.writeFileSync(' + json.dumps(str(marker)) + ', "executed");\n'
+            'export default {id:"unapproved",setup(){}};\n')
+        context, _ = self.finish(self.begin())
+        self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-3000:])
+        self.assertFalse(marker.exists(), 'Unapproved plugin executed host-side code at import')
+
+    def test_explicit_escape_deny_remains_denied(self):
+        marker = self.root / 'denied'
+        self.model.tool = 'shell_unsandboxed'; self.model.command = 'touch ' + str(marker)
+        self.config(escape='deny')
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse(prompts, 'An explicit deny was changed into an approval request')
+        self.assertFalse(marker.exists(), json.dumps(context)[-3000:])
+
+    def test_existing_global_plugins_remain_active(self):
+        user_config = Path.home() / '.config/opencode/opencode.json'
+        packages = json.loads(user_config.read_text()).get('plugins', [])
+        self.host.env['XDG_CACHE_HOME'] = str(Path.home() / '.cache')
+        self.config(existing_plugins=packages)
+        context, _ = self.finish(self.begin())
+        records = self.api('plugin.list')['data']
+        external = [r for r in records if r.get('source', {}).get('type') != 'builtin']
+        (ROOT / '.artifacts/existing-plugin-states.json').write_text(json.dumps(external, indent=2))
+        self.assertGreaterEqual(len(external), len(packages) + 1, external)
+        self.assertTrue(all(r.get('state', {}).get('status') == 'active' for r in external), external)
+        self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-2000:])
+
+    def test_session_move_changes_only_the_trusted_workspace(self):
+        self.config(); sid = self.begin(); context, _ = self.finish(sid)
+        second = self.root / 'second-project'; second.mkdir()
+        subprocess.run(['git', 'init', '--quiet', str(second)], check=True)
+        self.model.command = 'touch moved-marker; pwd'
+        self.api(f'/api/session/{sid}/move', {'directory': str(second)})
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Execute the test tool in the moved session.'})
+        context, _ = self.finish(sid, after_count=len(context['data']))
+        self.assertTrue((second / 'moved-marker').exists(), json.dumps(context)[-3000:])
+        self.assertFalse((self.project / 'moved-marker').exists())
+
+    def test_allowed_escape_is_forced_to_prompt_and_rejection_prevents_execution(self):
+        marker = self.root / 'rejected'
+        self.model.tool = 'shell_unsandboxed'; self.model.command = 'touch ' + str(marker)
+        self.config(escape='allow')
+        context, prompts = self.finish(self.begin(), decision='reject')
+        self.assertTrue(prompts, 'No permission prompt was observed')
+        self.assertFalse(marker.exists(), json.dumps(context)[-3000:])
+
+    def test_approved_escape_executes_the_exact_command(self):
+        marker = self.root / 'approved'
+        self.model.tool = 'shell_unsandboxed'; self.model.command = 'touch ' + str(marker)
+        self.config()
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertTrue(prompts)
+        self.assertTrue(marker.exists(), json.dumps(context)[-3000:])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
