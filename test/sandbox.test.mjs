@@ -131,6 +131,33 @@ test('read-only mode and home guard withhold workspace writes', async t => {
   }
 });
 
+test('Planner can create planning documents and scratch while application source stays read-only', async t => {
+  const o = fixture(t);
+  fs.mkdirSync(path.join(o.workspace, 'src')); fs.writeFileSync(path.join(o.workspace, 'src/main.js'), 'original');
+  const r = await runSandbox({ ...o, readOnly: true, writablePaths: ['docs/superpowers/plans', 'docs/superpowers/specs'],
+    command: 'printf plan > docs/superpowers/plans/one.md; printf design > docs/superpowers/specs/one.md; touch "$TMPDIR/note"; ! touch src/main.js' });
+  assert.equal(r.exit_code, 0, r.content);
+  assert.equal(fs.readFileSync(path.join(o.workspace, 'docs/superpowers/plans/one.md'), 'utf8'), 'plan');
+  assert.equal(fs.readFileSync(path.join(o.workspace, 'src/main.js'), 'utf8'), 'original');
+});
+
+test('Planner roots reject traversal and symlink aliases before creating outside files', async t => {
+  const o = fixture(t);
+  fs.symlinkSync(o.home, path.join(o.workspace, 'docs'));
+  for (const writablePaths of [['../home'], ['.'], ['docs/plans']]) {
+    await assert.rejects(runSandbox({ ...o, readOnly: true, writablePaths, command: 'touch forbidden' }), /planning|symlink/i);
+  }
+  assert.deepEqual(fs.readdirSync(o.home), []);
+});
+
+test('nested Git metadata stays read-only inside writable planning roots', async t => {
+  const o = fixture(t);
+  const metadata = path.join(o.workspace, 'docs/superpowers/plans/example/.git');
+  fs.mkdirSync(metadata, { recursive: true }); fs.writeFileSync(path.join(metadata, 'HEAD'), 'original');
+  const r = await runSandbox({ ...o, readOnly: true, writablePaths: ['docs/superpowers/plans'], command: 'touch docs/superpowers/plans/example/.git/HEAD' });
+  assert.notEqual(r.exit_code, 0, r.content);
+});
+
 test('output is bounded and timed-out commands cannot create delayed files', async t => {
   const o = fixture(t);
   const r = await runProcess('/bin/bash', ['-c', 'yes x | head -c 200000'], { cwd: o.workspace, timeout: 2000 });

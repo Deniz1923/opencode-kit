@@ -4,6 +4,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { planningRoot } from './policy.mjs';
 
 export const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SPECIAL_ROOTS = new Set(['/', '/tmp', '/run', '/dev/shm', '/dev', '/proc', '/sys']);
@@ -47,11 +48,11 @@ function cleanEnvironment(source, home, scratch) {
     YARN_CACHE_FOLDER: path.join(scratch, 'cache/yarn'), GIT_OPTIONAL_LOCKS: '0' };
 }
 
-export function runProcess(file, args, { cwd, env = process.env, timeout = 120000, signal, extraFD } = {}) {
+export function runProcess(file, args, { cwd, env = process.env, timeout = 120000, signal, extraFD, extraFDs = [] } = {}) {
   if (!Number.isSafeInteger(timeout) || timeout < 0) throw new Error('timeout must be a nonnegative integer');
   if (signal?.aborted) return Promise.resolve({ content: '[cancelled]', exit_code: 130, truncated: false });
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe', ...(extraFD === undefined ? [] : [extraFD])] });
+    const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe', ...(extraFD === undefined ? [] : [extraFD]), ...extraFDs] });
     const chunks = []; let size = 0; let truncated = false; let forced;
     const capture = chunk => {
       const remaining = 50 * 1024 - size;
@@ -116,9 +117,15 @@ function gitMounts(directory, mounts) {
     if (fs.existsSync(common)) mounts.add(fs.realpathSync(path.resolve(target, fs.readFileSync(common, 'utf8').trim())));
   }
 }
+function gitTreeMounts(directory, mounts) {
+  gitMounts(directory, mounts);
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && !['.git', '.opencode', '.agents', '.claude'].includes(entry.name)) gitTreeMounts(path.join(directory, entry.name), mounts);
+  }
+}
 
 async function executeSandbox({ workspace, cwd, command, home = os.homedir(), scratchRoot = '/tmp/opencode/sandbox',
-  bwrap = '/usr/bin/bwrap', env = process.env, readOnly = false, maskedPaths = [], timeout, signal }) {
+  bwrap = '/usr/bin/bwrap', env = process.env, readOnly = false, writablePaths = [], protectedPaths: extraProtected = [], maskedPaths = [], timeout, signal }) {
   if (typeof command !== 'string' || command.includes('\0')) throw unavailable('invalid command');
   workspace = realDir(workspace); home = realDir(home);
   cwd = cwd ? realDir(path.resolve(workspace, cwd)) : workspace;
@@ -126,6 +133,20 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
   try { fs.accessSync(bwrap, fs.constants.X_OK); } catch { throw unavailable('bwrap is missing or not executable'); }
   if (!path.isAbsolute(bwrap)) throw unavailable('bwrap path must be absolute');
   const writable = !readOnly && !SPECIAL_ROOTS.has(workspace) && !inside(home, workspace);
+  if (!Array.isArray(writablePaths)) throw unavailable('invalid planning roots');
+  const requestedRoots = writablePaths.map(planningRoot);
+  const narrow = readOnly && !SPECIAL_ROOTS.has(workspace) && !inside(home, workspace) && !inside(INSTALL_DIR, workspace) ? requestedRoots : [];
+  const checkRoot = relative => {
+    let current = workspace;
+    for (const part of relative.split('/')) {
+      current = path.join(current, part);
+      try { if (fs.lstatSync(current).isSymbolicLink()) throw unavailable('symlink in planning root'); }
+      catch (e) { if (e.code !== 'ENOENT') throw e; }
+    }
+    if ([INSTALL_DIR, ...extraProtected].some(p => inside(current, p) || inside(p, current))) throw unavailable('planning root overlaps a protected path');
+    return current;
+  };
+  const narrowTargets = narrow.map(checkRoot);
   // Never make the sandbox's own implementation writable.
   if (writable && inside(INSTALL_DIR, workspace)) throw unavailable('workspace contains the sandbox implementation');
   privateDir(scratchRoot);
@@ -138,6 +159,7 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
   catch { throw unavailable('workspace is busy or has a stale lock: ' + lock); }
   const placeholders = [];
   let filterFD;
+  const narrowFDs = [];
   try {
     if (writable) {
       for (const [name, kind] of RESERVED) {
@@ -155,21 +177,17 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
       '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/run', '--tmpfs', '/tmp', '--tmpfs', '/dev/shm'];
     if (!SPECIAL_ROOTS.has(workspace)) args.push(writable ? '--bind' : '--ro-bind', workspace, workspace);
     args.push('--bind', scratch, scratch);
+    const narrowPosition = args.length;
     const protectedPaths = new Set();
     if (writable) {
       for (const name of RESERVED.keys()) protectedPaths.add(path.join(workspace, name));
       // Existing nested repositories must not expose writable Git metadata.
-      const scan = dir => {
-        gitMounts(dir, protectedPaths);
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (entry.isDirectory() && !['.git', '.opencode', '.agents', '.claude'].includes(entry.name)) scan(path.join(dir, entry.name));
-        }
-      };
-      scan(workspace);
+      gitTreeMounts(workspace, protectedPaths);
     }
     for (const value of [INSTALL_DIR, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {
       if (fs.existsSync(value)) protectedPaths.add(value);
     }
+    for (const value of extraProtected) if (fs.existsSync(value)) protectedPaths.add(fs.realpathSync(value));
     for (const value of protectedPaths) args.push('--ro-bind', value, value);
     const secrets = ['.ssh', '.aws', '.gnupg', '.config/gh', '.docker', '.kube', '.azure', '.config/gcloud',
       '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.config/opencode/service.json',
@@ -182,6 +200,33 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
       else args.push('--ro-bind', '/dev/null', real);
     }
     const childEnv = cleanEnvironment(env, home, scratch);
+    if (narrowTargets.length) {
+      // Create only validated output roots, inside a separate confined namespace.
+      // No privileged host mkdir follows a project-controlled path.
+      const preparation = [...args];
+      const binding = preparation.findIndex((arg, i) => arg === '--ro-bind' && preparation[i + 1] === workspace);
+      if (binding < 0) throw unavailable('planning workspace mount is unavailable');
+      preparation[binding] = '--bind';
+      const prepareFD = socketFilterFD(scratchRoot);
+      try {
+        const prepared = await runProcess(bwrap, [...preparation, '--seccomp', '3', '--chdir', workspace, '--', '/usr/bin/mkdir', '-p', '--', ...narrowTargets],
+          { cwd: '/', env: childEnv, timeout: 10000, signal, extraFD: prepareFD });
+        if (prepared.exit_code !== 0) throw unavailable('planning directory preparation failed: ' + prepared.content);
+      } finally { fs.closeSync(prepareFD); }
+      const mounts = [];
+      for (let i = 0; i < narrowTargets.length; i++) {
+        checkRoot(narrow[i]);
+        const target = narrowTargets[i];
+        const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+        narrowFDs.push(fd);
+        if (fs.realpathSync('/proc/self/fd/' + fd) !== target) throw unavailable('planning root changed during setup');
+        mounts.push('--bind-fd', String(4 + i), target);
+        const metadata = new Set(); gitTreeMounts(target, metadata);
+        for (const meta of metadata) args.push('--ro-bind', meta, meta);
+      }
+      // Protected/credential mounts remain later and therefore authoritative.
+      args.splice(narrowPosition, 0, ...mounts);
+    }
     // Hide only our transient placeholders from Git's untracked-file listing.
     // The existing excludes file is read inside bwrap, never by a host process.
     // These scratch writes also occur inside bwrap, so symlinks cannot turn them
@@ -198,10 +243,11 @@ exec /bin/bash --noprofile --norc -c "$1"
     childEnv.OPENCODE_PLACEHOLDER_IGNORE = placeholders.map(p => '/' + path.basename(p.file)).join('\n');
     filterFD = socketFilterFD(scratchRoot);
     args.push('--seccomp', '3', '--chdir', cwd, '--', '/bin/bash', '--noprofile', '--norc', '-c', bootstrap, 'opencode-sandbox', command);
-    const result = await runProcess(bwrap, args, { cwd: '/', env: childEnv, timeout, signal, extraFD: filterFD });
+    const result = await runProcess(bwrap, args, { cwd: '/', env: childEnv, timeout, signal, extraFD: filterFD, extraFDs: narrowFDs });
     return { ...result, scratch };
   } finally {
     if (filterFD !== undefined) fs.closeSync(filterFD);
+    for (const fd of narrowFDs) fs.closeSync(fd);
     for (const { file, kind, ino, dev } of placeholders.reverse()) {
       try {
         const stat = fs.lstatSync(file);
