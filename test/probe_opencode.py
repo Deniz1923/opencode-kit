@@ -20,7 +20,7 @@ import re
 import base64
 
 
-ARTIFACTS = Path(__file__).resolve().parents[1] / '.artifacts'
+ARTIFACTS = Path(os.environ.get('OPENCODE_KIT_TEST_ARTIFACTS', str(Path(__file__).resolve().parents[1] / '.artifacts')))
 
 
 class ShellCompatibility(unittest.TestCase):

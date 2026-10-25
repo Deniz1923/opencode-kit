@@ -82,8 +82,11 @@ export async function main(argv = process.argv.slice(2)) {
     const checks = await doctor(paths); checks.forEach(c => console.log(`${c.okay ? 'PASS' : 'FAIL'} ${c.name}: ${c.detail}`));
     if (checks.some(c => !c.okay)) { process.exitCode = 1; return; }
     if (o.full) {
-      const r = spawnSync('python3', [path.join(ROOT, 'test/opencode_integration.py')], { stdio: 'inherit', timeout: 180000 });
-      if (r.error || r.status !== 0) throw new Error('OpenCode local-model checks failed: ' + (r.error?.message ?? r.status));
+      const artifacts = fs.mkdtempSync('/var/tmp/opencode-kit-full-doctor-');
+      try {
+        const r = spawnSync('python3', [path.join(ROOT, 'test/opencode_integration.py')], { stdio: 'inherit', timeout: 180000, env: { ...process.env, OPENCODE_KIT_TEST_ARTIFACTS: artifacts, PYTHONDONTWRITEBYTECODE: '1' } });
+        if (r.error || r.status !== 0) throw new Error('OpenCode local-model checks failed: ' + (r.error?.message ?? r.status));
+      } finally { fs.rmSync(artifacts, { recursive: true, force: true }); }
     }
     return;
   }

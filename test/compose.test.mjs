@@ -56,3 +56,8 @@ test('composing identical components twice does not duplicate settings or rules'
   assert.deepEqual(second.config, first.config);
   assert.equal(second.conflicts.length, 0);
 });
+test('renamed agents retain scoped shell denials in both replacement tools', () => {
+  const restricted = { ...pack, agents: { 'alice/reviewer': { ...pack.agents['alice/reviewer'], permissions: [{ action: 'shell', resource: 'printf forbidden*', effect: 'deny' }] } } };
+  const r = compose('{"agents":{"alice/reviewer":{"system":"existing"}}}', { sandbox: true, packs: [restricted], paths, pluginPath: '/store/plugin' }, { '["agents","alice/reviewer"]': { action: 'rename', name: 'alice/renamed' } });
+  for (const action of ['sandbox_shell', 'shell_unsandboxed']) assert.ok(r.config.agents['alice/renamed'].permissions.some(p => p.action === action && p.resource === 'printf forbidden*' && p.effect === 'deny'));
+});

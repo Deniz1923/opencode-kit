@@ -48,3 +48,10 @@ test('manifest capabilities cannot undo explicit imported file-edit denials', t 
   fs.writeFileSync(path.join(root, 'opencode-kit.json'), JSON.stringify({ namespace: 'strict', agents: [{ file: 'agents/reviewer.json', access: { profile: 'workspace-write' } }] }));
   assert.equal(readAgentPack(root).access['strict/reviewer'].profile, 'read-only');
 });
+test('host file/env interpolation is rejected in every imported agent field', t => {
+  const root = packDir(t); const file = path.join(root, 'agents/reviewer.json');
+  for (const addition of [{ description: '{file:/fake/private}' }, { model: '{env:PRIVATE_KEY}' }, { permissions: [{ action: 'read', resource: '{file:/fake/private}', effect: 'allow' }] }]) {
+    fs.writeFileSync(file, JSON.stringify({ system: 'Review safely', ...addition }));
+    assert.throws(() => readAgentPack(root), /interpolation/i);
+  }
+});

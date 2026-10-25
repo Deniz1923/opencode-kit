@@ -43,7 +43,7 @@ function agent(raw, body) {
   for (const field of Object.keys(raw)) if (!fields.has(field)) throw new Error('Unsupported agent field (executable/config fields are not imported): ' + field);
   const out = { ...raw, system: body ?? raw.system ?? raw.prompt ?? '', permissions: permissionRules(raw.permissions ?? raw.permission) };
   delete out.prompt; delete out.permission;
-  if (typeof out.system !== 'string' || /\{(?:file|env):/i.test(out.system)) throw new Error('Agent config interpolation is not imported; use literal prompt text');
+  if (typeof out.system !== 'string' || /\{(?:file|env):/i.test(JSON.stringify(out))) throw new Error('Agent config interpolation is not imported; use literal agent data');
   if (out.mode !== undefined && !['primary', 'subagent', 'all'].includes(out.mode)) throw new Error('Invalid agent mode');
   if (out.model !== undefined && typeof out.model !== 'string') throw new Error('Agent model must be a provider/model string');
   if (out.steps !== undefined && (!Number.isSafeInteger(out.steps) || out.steps < 1)) throw new Error('Agent steps must be a positive integer');
@@ -61,6 +61,7 @@ function walk(root, relative, out) {
 export function readAgentPack(source, { namespace } = {}) {
   const root = fs.realpathSync(source); const manifestPath = path.join(root, 'opencode-kit.json');
   const manifest = fs.existsSync(manifestPath) ? json(fs.readFileSync(safeFile(root, 'opencode-kit.json'), 'utf8')) : {};
+  if (/\{(?:file|env):/i.test(JSON.stringify(manifest))) throw new Error('Manifest config interpolation is not imported');
   if (manifest.formatVersion !== undefined && manifest.formatVersion !== 1) throw new Error('Unsupported agent pack format');
   namespace = namespace ?? manifest.namespace ?? path.basename(root);
   if (!validID(namespace)) throw new Error('Invalid pack namespace');

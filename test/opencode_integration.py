@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real OpenCode agent execution with a local scripted model; no paid/free quota."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import probe_opencode
 
 ROOT = Path(__file__).resolve().parents[1]
+ARTIFACTS = probe_opencode.ARTIFACTS
 
 
 class ScriptedModel(BaseHTTPRequestHandler):
@@ -63,7 +65,7 @@ class AgentIntegration(unittest.TestCase):
         self.host.tearDown()
         self.model.shutdown(); self.model.server_close(); self.thread.join(timeout=2)
 
-    def config(self, *, plugin=True, escape='ask', agent='build', existing_plugins=None, profile=None, terminal=True):
+    def config(self, *, plugin=True, escape='ask', agent='build', existing_plugins=None, profile=None, terminal=True, source_permissions=None):
         original = {'default_agent': agent, 'agents': {agent: {'mode': 'primary', 'system': 'Execute the requested test tool exactly once.'}},
                     'permissions': [{'action': '*', 'resource': '*', 'effect': 'allow'}], 'plugins': existing_plugins or [],
                     'model': 'probe/test', 'update': 'disable',
@@ -71,6 +73,8 @@ class AgentIntegration(unittest.TestCase):
                       'package': '@opencode/ai/providers/openai-compatible',
                       'settings': {'baseURL': f'http://127.0.0.1:{self.model.server_port}/v1', 'apiKey': 'local-test-only'},
                       'models': {'test': {'name': 'Local test'}}}}}
+        if source_permissions:
+            original['agents'][agent]['permissions'] = source_permissions
         source = self.root / 'input.json'; target = self.host.config / 'opencode.json'
         source.write_text(json.dumps(original))
         subprocess.run(['node', str(ROOT / 'config.mjs'), '--input', str(source), '--output', str(target)], check=True)
@@ -97,7 +101,7 @@ class AgentIntegration(unittest.TestCase):
     def begin(self):
         self.api('config.get')
         plugins = self.api('plugin.list')
-        (ROOT / '.artifacts/loaded-plugins.json').write_text(json.dumps(plugins, indent=2))
+        (ARTIFACTS / 'loaded-plugins.json').write_text(json.dumps(plugins, indent=2))
         result = self.api('session.create', {'location': {'directory': str(self.project)}})
         sid = result['data']['id']
         self.api(f'/api/session/{sid}/prompt', {'text': 'Execute the configured test tool now.'})
@@ -117,12 +121,12 @@ class AgentIntegration(unittest.TestCase):
             if terminal:
                 tool_requests = [r for r in self.model.requests if r.get('tools')]
                 if tool_requests:
-                    (ROOT / '.artifacts/tool-schemas.json').write_text(json.dumps(tool_requests[0]['tools'], indent=2))
-                (ROOT / '.artifacts' / (self._testMethodName + '.json')).write_text(json.dumps(context, indent=2))
-                (ROOT / '.artifacts/loaded-plugins.json').write_text(json.dumps(self.api('plugin.list'), indent=2))
+                    (ARTIFACTS / 'tool-schemas.json').write_text(json.dumps(tool_requests[0]['tools'], indent=2))
+                (ARTIFACTS / (self._testMethodName + '.json')).write_text(json.dumps(context, indent=2))
+                (ARTIFACTS / 'loaded-plugins.json').write_text(json.dumps(self.api('plugin.list'), indent=2))
                 return context, observed
             time.sleep(.05)
-        (ROOT / '.artifacts/failed-context.json').write_text(json.dumps(context, indent=2))
+        (ARTIFACTS / 'failed-context.json').write_text(json.dumps(context, indent=2))
         self.fail('Agent did not finish. Context tail: ' + text[-3000:] + '; model requests: ' + str(len(self.model.requests)))
 
     def test_sandbox_tool_runs_through_real_opencode(self):
@@ -132,7 +136,7 @@ class AgentIntegration(unittest.TestCase):
         self.assertIn('exit_code', json.dumps(context))
 
     def test_external_write_is_blocked(self):
-        marker = ROOT / '.artifacts' / ('outside-' + self.root.name)
+        marker = ARTIFACTS / ('outside-' + self.root.name)
         self.addCleanup(marker.unlink, missing_ok=True)
         self.model.command = 'touch ' + str(marker)
         self.config(); context, _ = self.finish(self.begin())
@@ -159,7 +163,7 @@ class AgentIntegration(unittest.TestCase):
         self.model.tool = 'shell'; self.model.command = 'touch ' + str(marker)
         context, _ = self.finish(self.begin())
         self.assertIn('TOOL_UNAVAILABLE', json.dumps(context)); self.assertFalse(marker.exists())
-        records = json.loads((ROOT / '.artifacts/loaded-plugins.json').read_text())['data']
+        records = json.loads((ARTIFACTS / 'loaded-plugins.json').read_text())['data']
         self.assertTrue(any(r.get('state', {}).get('status') == 'failed' for r in records), records)
 
     def test_project_cannot_override_global_shell_policy(self):
@@ -205,7 +209,7 @@ class AgentIntegration(unittest.TestCase):
         context, _ = self.finish(self.begin())
         records = self.api('plugin.list')['data']
         external = [r for r in records if r.get('source', {}).get('type') != 'builtin']
-        (ROOT / '.artifacts/existing-plugin-states.json').write_text(json.dumps(external, indent=2))
+        (ARTIFACTS / 'existing-plugin-states.json').write_text(json.dumps(external, indent=2))
         expected = {p if isinstance(p, str) else p['package'] for p in packages} | {str(ROOT)}
         self.assertGreaterEqual(len(external), len(expected), external)
         self.assertTrue(all(r.get('state', {}).get('status') == 'active' for r in external), external)
@@ -276,6 +280,30 @@ class AgentIntegration(unittest.TestCase):
         context, prompts = self.finish(self.begin(), decision='once')
         self.assertEqual((self.project / 'docs/superpowers/plans/native.md').read_text(), 'Native plan', json.dumps(context)[-4000:])
         self.assertFalse(prompts)
+
+    def test_todo_dependency_exposes_the_actual_tool(self):
+        self.config()
+        target = self.host.config / 'opencode.json'; c = json.loads(target.read_text())
+        c.setdefault('experimental', {})['todo'] = True; target.write_text(json.dumps(c))
+        context, _ = self.finish(self.begin())
+        names = {item['function']['name'] for request in self.model.requests for item in request.get('tools', [])}
+        self.assertIn('todowrite', names, json.dumps(context)[-2000:])
+
+    def test_scoped_imported_shell_deny_survives_a_renamed_agent(self):
+        self.config(agent='team/renamed', profile='read-only', source_permissions=[{'action': 'shell', 'resource': 'printf forbidden*', 'effect': 'deny'}])
+        scratch = self.root / 'scratch' / hashlib.sha256(str(self.project.resolve()).encode()).hexdigest()[:16] / 'tmp'
+        self.model.command = 'printf forbidden; touch "$TMPDIR/denied"'
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse((scratch / 'denied').exists(), json.dumps(context)[-3000:]); self.assertFalse(prompts)
+        self.model.command = 'printf allowed; touch "$TMPDIR/permitted"'
+        context, _ = self.finish(self.begin())
+        self.assertTrue((scratch / 'permitted').exists(), json.dumps(context)[-3000:])
+
+    def test_scoped_source_shell_deny_also_blocks_escape(self):
+        self.config(source_permissions=[{'action': 'shell', 'resource': 'touch *', 'effect': 'deny'}])
+        marker = self.root / 'escape-denied-by-source'; self.model.tool = 'shell_unsandboxed'; self.model.command = 'touch ' + str(marker)
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse(marker.exists(), json.dumps(context)[-3000:]); self.assertFalse(prompts)
 
 
 if __name__ == '__main__':

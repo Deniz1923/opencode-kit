@@ -76,3 +76,10 @@ test('replaces a prior local sandbox implementation while preserving other plugi
   const c = migrateConfig({ plugins: [previous, 'other-plugin'] }, { pluginPath: '/new/sandbox' });
   assert.deepEqual(c.plugins, ['other-plugin', { package: '/new/sandbox' }]);
 });
+test('installer state and backups have native-read hard denials', () => {
+  const c = migrateConfig({}, { home: '/home/friend', pluginPath: '/store/plugin' });
+  for (const resource of ['/home/friend/.config/opencode-kit/**', '/home/friend/.local/share/opencode-kit/state.json']) {
+    assert.ok(c.permissions.some(r => r.action === 'read' && r.resource === resource && r.effect === 'deny'));
+    assert.ok(c.policies.some(r => r.action === 'tool.use' && r.resource === 'read:' + resource && r.effect === 'deny'));
+  }
+});

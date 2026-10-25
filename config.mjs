@@ -49,6 +49,11 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
     if (raw.system !== undefined || raw.prompt !== undefined) agent.system = raw.system ?? raw.prompt;
     delete agent.prompt;
     agent.permissions = rules(raw.permissions ?? raw.permission);
+    const adapted = agent.permissions.filter(rule => rule.action === 'shell').flatMap(rule => [
+      { ...rule, action: 'sandbox_shell' },
+      ...(rule.effect === 'deny' ? [{ ...rule, action: 'shell_unsandboxed' }] : []),
+    ]).map(rule => agent.permissions.some(existing => existing.action === rule.action && existing.resource === rule.resource && existing.effect === 'deny') ? { ...rule, effect: 'deny' } : rule);
+    agent.permissions = enforce(agent.permissions, adapted);
     delete agent.permission;
     if (['plan', 'explore', 'code-reviewer', 'debugger'].includes(name)) {
       agent.permissions = enforce(agent.permissions, [{ action: 'shell_unsandboxed', resource: '*', effect: 'deny' }]);
@@ -96,6 +101,8 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   }
   const immutable = [...new Set([path.join(home, '.config/opencode'), paths.configDir, path.join(home, '.cache/opencode'), paths.kitConfig, paths.store, pluginPath])];
   for (const name of immutable) additions.push({ action: 'edit', resource: name + '/**', effect: 'deny' });
+  const privateHistory = [paths.kitConfig + '/**', paths.state ?? path.join(paths.store, 'state.json')];
+  for (const resource of privateHistory) additions.push({ action: 'read', resource, effect: 'deny' });
   out.permissions = enforce(rules(out.permissions ?? out.permission), additions);
   delete out.permission;
   out.plugins = [...(out.plugins ?? [])].filter(entry => (typeof entry === 'string' ? entry : entry.package) !== pluginPath && !previousSandbox(entry));
@@ -105,6 +112,7 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
     { action: 'integration.use', resource: 'plugin:*', effect: 'deny' },
     ...out.plugins.map(entry => ({ action: 'integration.use', resource: 'plugin:' + pluginTarget(entry), effect: 'allow' })),
     ...immutable.map(name => ({ action: 'tool.use', resource: 'edit:' + name + '/**', effect: 'deny' })),
+    ...privateHistory.map(name => ({ action: 'tool.use', resource: 'read:' + name, effect: 'deny' })),
   ];
   out.policies = enforce(out.policies ?? [], policies);
   return out;

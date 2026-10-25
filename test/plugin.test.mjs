@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createPlugin } from '../index.js';
+import { policyPaths } from '../policy.mjs';
 
 function host(t, { deny = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-plugin-test-'));
@@ -110,4 +111,14 @@ test('missing policy stops execution instead of guessing agent privileges', asyn
   const h = host(t); await h.plugin.setup(h.ctx); fs.unlinkSync(h.policyFile);
   await assert.rejects(h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, h.toolCtx), /policy.*missing|setup/i);
   assert.ok(!fs.existsSync(path.join(h.workspace, 'forbidden')));
+});
+test('copied installer config in state and backups is unreadable to sandboxed shell commands', async t => {
+  const h = host(t); const previous = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = path.join(h.root, 'data');
+  t.after(() => { if (previous === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previous; });
+  const state = policyPaths().state, backup = path.join(h.root, 'config/backups/one/transaction.json');
+  for (const file of [state, backup]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'fake-provider-secret'); }
+  await h.plugin.setup(h.ctx);
+  const r = await h.tools.get('sandbox_shell').execute({ command: `cat '${state}' '${backup}'` }, h.toolCtx);
+  assert.ok(!r.content.includes('fake-provider-secret'), r.content);
 });

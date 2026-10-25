@@ -19,6 +19,8 @@ test('packed release installs offline and runs sandbox setup and doctor in a dis
   command(bin, ['init', '--sandbox', '--agents', 'deniz', '--apply'], { env });
   const out = command(bin, ['doctor'], { env }); assert.match(out, /PASS real bubblewrap execution/);
   assert.ok(!out.includes('FAIL'), out);
+  command(bin, ['doctor', '--full'], { env, timeout: 60000 });
+  assert.equal(fs.existsSync(prefix + '/lib/node_modules/opencode-workspace-sandbox/.artifacts'), false, 'Full doctor must not write into installed package code');
   const listing = command('tar', ['-tzf', tar]);
   assert.ok(!/\.artifacts|auth\.json|state\.json|\.git\//.test(listing), listing);
 });

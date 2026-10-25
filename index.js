@@ -83,6 +83,7 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
               writablePaths: access.planningRoots,
               scratchRoot: policy.scratchRoot,
               protectedPaths: [path.dirname(policyFile), policyPaths().store],
+              maskedPaths: [path.dirname(policyFile), policyPaths().state],
             }));
           } catch (error) {
             return toolResult({ content: error.message, exit_code: 125, truncated: false });
