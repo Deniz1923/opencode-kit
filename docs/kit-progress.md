@@ -12,7 +12,7 @@ Preflight interfaces: trusted policy -> plugin and composer; validated agent dat
 - Task 2: complete. Planner output roots are prepared inside bwrap, checked for symlinks, and mounted from pinned directory descriptors. Source and nested Git metadata remain read-only. RED tests observed; `npm test` passes 34/34.
 - Task 3: complete. Validated native packs, explicit conflict choices, renamed references/profiles and JSONC-preserving composition implemented. Optional Deniz agents contain prompt data only. RED tests observed; full suite passes 45/45.
 - Task 4: complete. Versioned private code, ownership-aware config removal, stale-preview rejection, backups, locks, rollback and interrupted-transaction recovery implemented. Manual policy/code changes are detected. RED tests observed; suite passes 51/51.
-- Task 5: pending.
+- Task 5: complete. Option-based CLI, independent selections, updates/removal, doctor, Linux compatibility gates, package metadata/license/docs and CI added. `npm test` passes 58/58, including an offline installed tarball; `npm run test:opencode` passes 16/16, including positive native Plan writes and source-edit rejection. Packaging caught/fixed the npm executable-symlink entrypoint. Doctor's external probe now uses a host-visible /var/tmp parent rather than private /tmp.
 
 Ruling: Preserve the user's already-authorized inline execution instead of asking for another plan/execution-method approval. Cost if wrong: adjust implementation against the approved spec, with tests and reversible staging.
 

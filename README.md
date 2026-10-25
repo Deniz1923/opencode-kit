@@ -1,104 +1,182 @@
-# OpenCode workspace sandbox
+# OpenCode kit
 
-Experimental Linux x86-64 agent shell integration for OpenCode 2.1.3 and
-bubblewrap 0.13.1. Node.js 26 runs the tests; the plugin uses Node-compatible
-built-in modules and has no package dependencies.
+Choose a Linux sandbox, Deniz's agents, another author's agents, or a combination.
+Existing settings stay in place. Conflicts offer **keep, replace, or rename**;
+noninteractive installation stops when a choice is missing.
 
-## Behavior
+Local release candidate: no public GitHub/npm release exists yet. The package is
+marked private to prevent accidental publication. License: MIT.
 
-- `sandbox_shell` runs terminal commands through bubblewrap. The trusted session
-  workspace and private per-workspace scratch are writable. Other host paths are
-  read-only; Git metadata and reserved workspace-root configuration paths are
-  protected. Read-only agents also receive a read-only workspace.
-- Network namespaces isolate the host network. `/tmp`, `/run`, and `/dev/shm`
-  are private. A native-x86-64 seccomp filter additionally denies Unix socket
-  creation, alternate syscall ABIs, ptrace and io_uring. This prevents reaching
-  host Unix sockets at unusual paths as well as standard runtime paths.
-  `socketpair` remains available for private IPC. Software requiring Unix socket
-  creation, localhost, GPU devices or io_uring may need approved host execution.
-- A default-deny environment allowlist and known credential-path masks reduce
-  credential exposure. This is not a guarantee that all readable files are free
-  of secrets. Project `.env` files remain available to shell commands for tests.
-- `shell_unsandboxed` asks before every command, including the effective working
-  directory in the permission metadata. Rejections propagate without execution.
-  `plan`, `explore`, `code-reviewer`, and `debugger` cannot escape. `test-engineer`
-  may request approval for tests that require host access.
-- The native agent `shell` action is denied by a global hard policy. If the
-  plugin is missing or fails, its tools disappear and native shell stays denied.
-- Global integration policy permits only your existing plugin targets and this
-  plugin. Installing another plugin requires an explicit config/policy update.
+## Install
 
-There is no configured shell wrapper. OpenCode 2.1.3 falls back to a host shell
-if a configured wrapper is missing; the reproducible probe and source reference
-are in [docs/compatibility.md](docs/compatibility.md).
+Requirements: **Linux x86-64**, OpenCode **2.1.3**, bubblewrap **0.13.1**, Git,
+Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
+versions are rejected until compatibility is tested. Agent prompts are ordinary
+text; this installer and OS sandbox target Linux only.
 
-## Scope
-
-The OS boundary applies to `sandbox_shell`. OpenCode itself, native file tools,
-MCP/LSP servers, existing trusted plugins and user-initiated TUI/API terminal
-actions run host-side. Their behavior is governed by OpenCode permissions and
-the trust placed in those integrations. This is not a sandbox around the entire
-agent process. Review new project configurations before loading them.
-
-Scratch persists at `/tmp/opencode/sandbox/<workspace-hash>`. Only that project's
-scratch is bound into each sandbox. Files there can be accessed by other host
-processes running as your user. Keep secrets out of scratch.
-
-Reserved root paths (`opencode.json`, `opencode.jsonc`, `.mcp.json`, `.opencode`,
-`.agents`, `.claude`, `.git`) need mountpoints even when absent. The runner creates
-temporary placeholders, protects them read-only, then removes only unchanged
-placeholders it created. A per-workspace lock serializes this operation. Git
-status uses a temporary excludes file inside the sandbox, preserving the user's
-existing excludes file and hiding the synthetic entries.
-
-An abruptly killed host/plugin process can leave placeholders or a `.lock`
-file. The runner fails closed on an existing lock. Check that no command is
-still running before manually removing a stale lock. Do not delete an existing
-config or non-empty directory as cleanup. Normal command timeout/cancellation
-kills the process group and performs cleanup automatically.
-
-## Stage a configuration
-
-Keep this repository at a stable path outside the workspaces it will sandbox.
-No files from this repository should be copied into OpenCode's auto-discovered
-plugin directory during staging.
+Inside the downloaded/cloned checkout:
 
 ```sh
-node config.mjs --input ~/.config/opencode/opencode.json \
-  --output /tmp/opencode-sandbox.preview.json
+npm ci --ignore-scripts
+node cli.mjs init
 ```
 
-Review the generated file before applying it. The generator preserves unrelated
-settings, plugin entries and prompts, converts legacy permission/agent shapes,
-and adds the sandbox integration and policies. It refuses to overwrite its
-input. Running it twice does not duplicate rules or plugin entries.
+The menu offers sandbox + Deniz agents + workflow, sandbox only, or agents only.
+It previews changes, asks before applying/restarting, and makes private backups.
+It does not install or rebuild OpenCode. Flags allow independent selections:
 
-Applying the preview to the global configuration and restarting OpenCode are
-separate rollout steps. Back up the existing config first. To roll back, restore
-that backup and restart OpenCode. This repository is private/unpublished; no
-upstream PR or npm publication has been made.
+```sh
+# Preview only. No live configuration changes.
+node cli.mjs init --sandbox --dry-run
 
-## Verify
+# --apply authorizes applying the selection, with conflicts still checked.
+node cli.mjs init --sandbox --agents deniz --workflow --apply
+node cli.mjs add agents ./friends-agent-pack --apply
+node cli.mjs add agents github:AUTHOR/REPOSITORY#TAG --apply
 
-Run outside an outer sandbox that prohibits namespaces or localhost servers:
+node cli.mjs list
+node cli.mjs doctor
+node cli.mjs update --dry-run
+node cli.mjs remove agents:deniz --apply
+node cli.mjs remove sandbox --apply
+```
+
+Restart OpenCode after applying, or explicitly append `--restart`.
+Sandbox-only keeps your prompts. Agents-only does not install a sandbox.
+Existing executable plugins are preserved; agent packs cannot install plugins.
+Deniz's Build prompt uses todos, so its pack visibly declares the todo dependency.
+Keeping an existing disabled todo setting skips the dependent pack.
+
+## Profiles
+
+| Profile | Project writes | Scratch | Host escape |
+| --- | --- | --- | --- |
+| `read-only` | None | Allowed | Denied by default |
+| `planner` | Selected planning folders | Allowed | Denied by default |
+| `workspace-write` | Workspace except protected paths | Allowed | Ask if enabled |
+
+Plan defaults to `docs/superpowers/specs/` and `docs/superpowers/plans/`. Both shell
+and native edit permission checks apply its limits. Source stays read-only.
+Unknown agents default conservatively; explicit imported terminal/escape denials
+remain restrictive. Project plugin options cannot change trusted capabilities.
+
+```sh
+node cli.mjs init --sandbox --agents ./team \
+  --profile team/architect=planner \
+  --planning-root docs/designs --planning-root docs/plans --apply
+node cli.mjs init --sandbox --profile team/builder=workspace-write \
+  --escape team/builder=ask --apply
+```
+
+Review the printed profiles. Host escape always requires approval. Defaults are
+writer for Build/General/Chat, planner for Plan, reader for review/exploration.
+The test engineer may request an approved host escape.
+
+## Make an agent pack
+
+Place native Markdown agents under `agents/` (or `.opencode/agents/`):
+
+```markdown
+---
+description: Reviews code without modifying project files
+mode: subagent
+permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+---
+Inspect changes and report concrete bugs with file references.
+```
+
+JSON/JSONC definitions also work. An optional `opencode-kit.json` declares metadata:
+
+```json
+{
+  "formatVersion": 1,
+  "name": "My team",
+  "namespace": "team",
+  "version": "1.0.0",
+  "agents": [
+    {"file": "agents/reviewer.md", "access": {"profile": "read-only"}},
+    {"file": "agents/planner.md", "access": {"profile": "planner"}}
+  ]
+}
+```
+
+IDs become `team/reviewer`, etc. Structured default-agent references and profiles
+follow renames. Names inside prompt prose remain literal text. GitHub sources
+resolve to a recorded commit. Hooks, plugins, executable fields, config
+interpolation, symlinked files, scripts and submodules are not imported. Prompts
+are still untrusted instructions; review them before use.
+
+Automation can pass `--resolve choices.json`, using IDs printed by the preview:
+
+```json
+{
+  "[\"default_agent\"]": {"action":"keep"},
+  "[\"agents\",\"team/reviewer\"]": {"action":"rename","name":"team/reviewer-v2"}
+}
+```
+
+## Storage and recovery
+
+Paths follow `$HOME`, XDG settings, and `OPENCODE_CONFIG_DIR`:
+
+- OpenCode config: `~/.config/opencode/opencode.json` or existing `.jsonc`.
+- Trusted policy and backups: `~/.config/opencode-kit/`.
+- Ownership state: `~/.local/share/opencode-kit/state.json`.
+- Versioned code: `~/.local/share/opencode-kit/versions/<content-hash>/`.
+- Private project scratch: `/tmp/opencode/sandbox/<workspace-hash>/`.
+
+Updating a checkout does not silently alter managed live code. Removal restores
+owned changes while preserving unrelated settings/comments. Changed owned
+entries require a choice. Stale previews and modified code are rejected. Backups
+can contain existing provider settings: keep them private; never publish them.
+
+After interruption, stop other setup processes, then run `node cli.mjs recover`.
+Recovery restores previous files and refuses to overwrite later user edits.
+Old unreferenced code/backups remain for inspection; no recursive user-data
+cleanup occurs. Sandbox failures and stale workspace locks fail closed. See
+[compatibility notes](docs/compatibility.md) for the rejected wrapper architecture.
+
+## Security scope
+
+The plugin-owned `sandbox_shell` runs commands inside bwrap. The built-in agent
+`shell` is hard-denied. Missing/failed plugins leave it blocked. OpenCode 2.1.3
+falls back to Bash for a missing configured shell wrapper, so wrappers are not
+used as a boundary.
+
+The OS sandbox blocks network and host Unix sockets, uses minimal devices,
+makes the host read-only, protects Git/config/plugin paths, masks common
+credentials and allows only selected environment variables. Workspace-write can
+delete ordinary project files. Planner gets only its output folders plus scratch.
+Missing bwrap fails closed. Kernel/bwrap vulnerabilities remain possible.
+
+OpenCode itself, native file tools, executable plugins, MCP/LSP servers, web
+tools, and user terminals are outside this shell OS boundary. Native edits use
+application permission checks. Existing plugins retain host authority. Web tools
+ask by policy. Project `.env` is readable to shell tests; native `.env` reads are
+denied. This is not a whole-agent sandbox or complete secret vault. Approved
+escapes run with your full user authority. Host processes under your user can
+access scratch; keep secrets out of it.
+
+`doctor` checks versions, profiles, managed safeguards and real bwrap execution.
+`doctor --full` also runs private OpenCode servers with a local scripted model;
+Python 3 is required and no model quota is consumed.
+
+## Test and share a local release
 
 ```sh
 npm test
 npm run test:opencode
+npm pack --ignore-scripts
+npm install --global ./opencode-workspace-sandbox-0.2.0.tgz --ignore-scripts
+opencode-kit init
 ```
 
-The first command covers real bwrap containment, working-directory boundaries,
-Git and config protection, credentials/environment, sockets, output limits,
-timeout children, plugin permission order, and config migration.
-
-The second starts private OpenCode servers and a scripted model listening only
-on localhost. It uses no external model, token quota or copied auth files. It
-checks real tool calls, approval/rejection, explicit denies, absent/failed
-plugins, global policy precedence, project plugin blocking, session moves and
-compatibility with the plugin entries in the current user's global config.
-Test config/state are isolated; the compatibility case reuses the user's
-existing package cache. Observations go in git-ignored `.artifacts/`.
-
-`python3 test/probe_opencode.py` is a separate diagnostic of the **superseded**
-wrapper architecture. Its missing-wrapper safety assertion intentionally fails
-on OpenCode 2.1.3. It is not part of the plugin-owned implementation's test suite.
+Real namespace/server tests need a compatible host permitting unprivileged bwrap.
+CI runs data/installer checks; full host checks remain a release requirement.
+The historical `test/probe_opencode.py` wrapper diagnostic intentionally fails
+its missing-wrapper assertion on 2.1.3; it is excluded from the passing suite.
+Choose the repository and public package name before publication. The package
+excludes credentials, live configs, backups, development artifacts and history.

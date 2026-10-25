@@ -28,6 +28,15 @@ function pluginTarget(entry) {
   if (spec.startsWith('/') || spec.startsWith('file:')) return spec.replace(/^file:\/\//, '');
   return spec.replace(/(?<!^)@.*$/, '');
 }
+function previousSandbox(entry) {
+  const target = pluginTarget(entry);
+  if (target === 'opencode-workspace-sandbox') return true;
+  if (!path.isAbsolute(target)) return false;
+  try {
+    const directory = fs.statSync(target).isDirectory() ? target : path.dirname(target);
+    return JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8')).name === 'opencode-workspace-sandbox';
+  } catch { return false; }
+}
 
 export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL_DIR, accessPolicy, paths = policyPaths(home, {}) } = {}) {
   if (!path.isAbsolute(home) || !path.isAbsolute(pluginPath)) throw new Error('home and pluginPath must be absolute');
@@ -89,7 +98,7 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   for (const name of immutable) additions.push({ action: 'edit', resource: name + '/**', effect: 'deny' });
   out.permissions = enforce(rules(out.permissions ?? out.permission), additions);
   delete out.permission;
-  out.plugins = [...(out.plugins ?? [])].filter(entry => (typeof entry === 'string' ? entry : entry.package) !== pluginPath);
+  out.plugins = [...(out.plugins ?? [])].filter(entry => (typeof entry === 'string' ? entry : entry.package) !== pluginPath && !previousSandbox(entry));
   out.plugins.push({ package: pluginPath });
   const policies = [
     { action: 'tool.use', resource: 'shell:*', effect: 'deny' },

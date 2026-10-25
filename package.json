@@ -1,9 +1,14 @@
 {
   "name": "opencode-workspace-sandbox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "exports": "./index.js",
+  "description": "Selectable OpenCode agent packs and a Linux bubblewrap workspace sandbox",
+  "license": "MIT",
+  "engines": { "node": ">=22" },
+  "bin": { "opencode-kit": "./cli.mjs" },
+  "files": ["index.js", "sandbox.mjs", "policy.mjs", "defaults.mjs", "config.mjs", "cli.mjs", "kit/", "packs/", "test/opencode_integration.py", "test/probe_opencode.py", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "test:opencode": "python3 test/opencode_integration.py"

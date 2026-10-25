@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { migrateConfig } from '../config.mjs';
 import { defaultPolicy } from '../defaults.mjs';
 
@@ -65,4 +68,11 @@ test('planner and imported reviewer rules agree with selected access profiles', 
   assert.ok(c.agents.plan.permissions.some(r => r.action === 'edit' && r.resource === 'docs/superpowers/plans/**' && r.effect === 'allow'));
   assert.ok(c.agents['other/reviewer'].permissions.some(r => r.action === 'sandbox_shell' && r.effect === 'deny'));
   assert.ok(c.agents['other/reviewer'].permissions.some(r => r.action === 'shell_unsandboxed' && r.effect === 'deny'));
+});
+test('replaces a prior local sandbox implementation while preserving other plugins', t => {
+  const previous = fs.mkdtempSync(path.join(os.tmpdir(), 'old-sandbox-'));
+  t.after(() => fs.rmSync(previous, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(previous, 'package.json'), JSON.stringify({ name: 'opencode-workspace-sandbox' }));
+  const c = migrateConfig({ plugins: [previous, 'other-plugin'] }, { pluginPath: '/new/sandbox' });
+  assert.deepEqual(c.plugins, ['other-plugin', { package: '/new/sandbox' }]);
 });

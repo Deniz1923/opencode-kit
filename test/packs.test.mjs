@@ -42,3 +42,9 @@ test('GitHub source parsing accepts pinned references and rejects arbitrary tran
   assert.deepEqual(parseGithubSource('github:alice/agents#v1.0.0'), { owner: 'alice', repo: 'agents', ref: 'v1.0.0' });
   for (const source of ['git+ssh://host/repo', 'github:alice/../evil', 'github:alice/repo#--exec=x']) assert.throws(() => parseGithubSource(source), /GitHub|reference/i);
 });
+test('manifest capabilities cannot undo explicit imported file-edit denials', t => {
+  const root = packDir(t);
+  fs.writeFileSync(path.join(root, 'agents/reviewer.json'), JSON.stringify({ system: 'Review', permissions: [{ action: 'edit', resource: '*', effect: 'deny' }] }));
+  fs.writeFileSync(path.join(root, 'opencode-kit.json'), JSON.stringify({ namespace: 'strict', agents: [{ file: 'agents/reviewer.json', access: { profile: 'workspace-write' } }] }));
+  assert.equal(readAgentPack(root).access['strict/reviewer'].profile, 'read-only');
+});

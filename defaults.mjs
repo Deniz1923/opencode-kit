@@ -1,4 +1,4 @@
-import { validatePolicy } from './policy.mjs';
+import { validatePolicy, PLANNING_ROOTS } from './policy.mjs';
 
 // Setup defaults, not runtime authority. Runtime reads the user's trusted policy.
 const defaults = {
@@ -19,6 +19,11 @@ export function defaultPolicy(agents = {}, { scratchRoot = '/tmp/opencode/sandbo
     const raw = { profile: id !== 'plan' && explicitlyDenied(permissions, 'edit') ? 'read-only' : known[0],
       shell: !explicitlyDenied(permissions, 'shell'), escape: known[1], ...overrides[id] };
     // Never adapt an explicit source denial into an implicit grant.
+    if (explicitlyDenied(permissions, 'edit')) {
+      const roots = raw.planningRoots ?? PLANNING_ROOTS;
+      const scopedPlanner = raw.profile === 'planner' && roots.every(root => permissions.some(rule => rule.action === 'edit' && rule.resource === root + '/**' && rule.effect === 'allow'));
+      if (!scopedPlanner) { raw.profile = 'read-only'; raw.planningRoots = []; }
+    }
     if (explicitlyDenied(permissions, 'shell')) { raw.shell = false; raw.escape = 'deny'; }
     if (explicitlyDenied(permissions, 'shell_unsandboxed')) raw.escape = 'deny';
     return [id, raw];

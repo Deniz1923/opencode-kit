@@ -1,0 +1,24 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+test('packed release installs offline and runs sandbox setup and doctor in a disposable home', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-release-')); t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const command = (bin, args, opts = {}) => { const r = spawnSync(bin, args, { cwd: root, encoding: 'utf8', timeout: 30000, ...opts }); assert.equal(r.status, 0, r.stderr + r.stdout); return r.stdout; };
+  command('npm', ['pack', '--ignore-scripts', '--pack-destination', temp, '--json']);
+  const tar = path.join(temp, fs.readdirSync(temp).find(f => f.endsWith('.tgz')));
+  const prefix = path.join(temp, 'install');
+  command('npm', ['install', '--global', '--prefix', prefix, '--offline', '--ignore-scripts', '--no-audit', '--no-fund', tar]);
+  const home = path.join(temp, 'home'); fs.mkdirSync(home);
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: home + '/.config', XDG_DATA_HOME: home + '/.local/share', OPENCODE_CONFIG_DIR: home + '/.config/opencode' };
+  const bin = prefix + '/bin/opencode-kit';
+  command(bin, ['init', '--sandbox', '--agents', 'deniz', '--apply'], { env });
+  const out = command(bin, ['doctor'], { env }); assert.match(out, /PASS real bubblewrap execution/);
+  assert.ok(!out.includes('FAIL'), out);
+  const listing = command('tar', ['-tzf', tar]);
+  assert.ok(!/\.artifacts|auth\.json|state\.json|\.git\//.test(listing), listing);
+});

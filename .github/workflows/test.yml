@@ -1,0 +1,15 @@
+name: Data and installer checks
+on: [push, pull_request]
+jobs:
+  data-and-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node --test test/config.test.mjs test/policy.test.mjs test/packs.test.mjs test/compose.test.mjs test/install.test.mjs test/cli.test.mjs
+      - run: npm pack --ignore-scripts --dry-run
+      # Real bwrap/OpenCode checks run on the documented compatible Linux host.

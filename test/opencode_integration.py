@@ -29,7 +29,7 @@ class ScriptedModel(BaseHTTPRequestHandler):
         finish = 'stop'
         if not has_result and tool in tools:
             delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call_local_probe', 'type': 'function',
-                'function': {'name': tool, 'arguments': json.dumps({'command': self.server.command})}}]}
+                'function': {'name': tool, 'arguments': json.dumps(getattr(self.server, 'arguments', None) or {'command': self.server.command})}}]}
             finish = 'tool_calls'
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
@@ -63,7 +63,7 @@ class AgentIntegration(unittest.TestCase):
         self.host.tearDown()
         self.model.shutdown(); self.model.server_close(); self.thread.join(timeout=2)
 
-    def config(self, *, plugin=True, escape='ask', agent='build', existing_plugins=None):
+    def config(self, *, plugin=True, escape='ask', agent='build', existing_plugins=None, profile=None, terminal=True):
         original = {'default_agent': agent, 'agents': {agent: {'mode': 'primary', 'system': 'Execute the requested test tool exactly once.'}},
                     'permissions': [{'action': '*', 'resource': '*', 'effect': 'allow'}], 'plugins': existing_plugins or [],
                     'model': 'probe/test', 'update': 'disable',
@@ -75,6 +75,13 @@ class AgentIntegration(unittest.TestCase):
         source.write_text(json.dumps(original))
         subprocess.run(['node', str(ROOT / 'config.mjs'), '--input', str(source), '--output', str(target)], check=True)
         c = json.loads(target.read_text())
+        # Same private policy location used by the real plugin; no project option
+        # is trusted to grant filesystem access.
+        policy_dir = self.root / 'xdg-config/opencode-kit'; policy_dir.mkdir(parents=True, exist_ok=True)
+        access = profile or ('planner' if agent == 'plan' else 'read-only' if agent == 'foreign/reviewer' else 'workspace-write')
+        policy = {'schemaVersion': 1, 'scratchRoot': str(self.root / 'scratch'), 'agents': {
+            agent: {'profile': access, 'shell': terminal, 'escape': 'ask' if agent == 'build' and terminal else 'deny'}}}
+        policy_file = policy_dir / 'policy.json'; policy_file.write_text(json.dumps(policy)); policy_file.chmod(0o600)
         if not plugin:
             c['plugins'] = []
         else:
@@ -108,6 +115,9 @@ class AgentIntegration(unittest.TestCase):
             text = json.dumps(context)
             terminal = any(m.get('type') == 'assistant' and m.get('finish') in ('stop', 'error') for m in context.get('data', [])[after_count:])
             if terminal:
+                tool_requests = [r for r in self.model.requests if r.get('tools')]
+                if tool_requests:
+                    (ROOT / '.artifacts/tool-schemas.json').write_text(json.dumps(tool_requests[0]['tools'], indent=2))
                 (ROOT / '.artifacts' / (self._testMethodName + '.json')).write_text(json.dumps(context, indent=2))
                 (ROOT / '.artifacts/loaded-plugins.json').write_text(json.dumps(self.api('plugin.list'), indent=2))
                 return context, observed
@@ -184,7 +194,12 @@ class AgentIntegration(unittest.TestCase):
 
     def test_existing_global_plugins_remain_active(self):
         user_config = Path.home() / '.config/opencode/opencode.json'
+        if not user_config.exists():
+            self.skipTest('No existing user plugins to check on this host')
         packages = json.loads(user_config.read_text()).get('plugins', [])
+        # Avoid loading the previous sandbox plugin and the candidate with the
+        # same plugin ID into one disposable server.
+        packages = [p for p in packages if 'opencode-sandbox' not in (p if isinstance(p, str) else p['package']) and '/opencode-kit/versions/' not in (p if isinstance(p, str) else p['package'])]
         self.host.env['XDG_CACHE_HOME'] = str(Path.home() / '.cache')
         self.config(existing_plugins=packages)
         context, _ = self.finish(self.begin())
@@ -222,6 +237,45 @@ class AgentIntegration(unittest.TestCase):
         context, prompts = self.finish(self.begin(), decision='once')
         self.assertTrue(prompts)
         self.assertTrue(marker.exists(), json.dumps(context)[-3000:])
+
+    def test_planner_shell_writes_plans_and_scratch_but_not_source(self):
+        self.config(agent='plan')
+        self.model.command = 'touch src-denied; mkdir -p docs/superpowers/plans; printf planned > docs/superpowers/plans/test.md; touch "$TMPDIR/scratch-plan"'
+        context, _ = self.finish(self.begin())
+        self.assertFalse((self.project / 'src-denied').exists())
+        self.assertEqual((self.project / 'docs/superpowers/plans/test.md').read_text(), 'planned', json.dumps(context)[-4000:])
+
+    def test_foreign_reviewer_stays_readonly_despite_project_plugin_options(self):
+        self.config(agent='foreign/reviewer')
+        (self.project / 'opencode.json').write_text(json.dumps({'plugins': [{'package': str(ROOT), 'options': {'readOnly': False, 'policyFile': '/tmp/untrusted'}}],
+            'agents': {'foreign/reviewer': {'permissions': [{'action': '*', 'resource': '*', 'effect': 'allow'}]}}}))
+        self.model.command = 'touch reviewer-write; printf reviewer-tested'
+        context, _ = self.finish(self.begin())
+        self.assertFalse((self.project / 'reviewer-write').exists())
+        self.assertIn('reviewer-tested', json.dumps(context))
+
+    def test_imported_terminal_denial_cannot_use_replacement_shell(self):
+        self.config(agent='foreign/reviewer', terminal=False)
+        self.model.command = 'touch terminal-denied'
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse((self.project / 'terminal-denied').exists()); self.assertFalse(prompts)
+
+    def test_planner_native_edit_cannot_write_application_source(self):
+        self.config(agent='plan')
+        (self.project / 'source.txt').write_text('original')
+        self.model.tool = 'edit'
+        self.model.arguments = {'path': str(self.project / 'source.txt'), 'oldString': 'original', 'newString': 'must not write'}
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertEqual((self.project / 'source.txt').read_text(), 'original'); self.assertFalse(prompts)
+        self.assertNotIn('TOOL_UNAVAILABLE', json.dumps(context))
+
+    def test_planner_native_write_creates_only_a_planning_document(self):
+        self.config(agent='plan')
+        self.model.tool = 'write'
+        self.model.arguments = {'path': str(self.project / 'docs/superpowers/plans/native.md'), 'content': 'Native plan'}
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertEqual((self.project / 'docs/superpowers/plans/native.md').read_text(), 'Native plan', json.dumps(context)[-4000:])
+        self.assertFalse(prompts)
 
 
 if __name__ == '__main__':
