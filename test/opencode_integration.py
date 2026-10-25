@@ -191,7 +191,8 @@ class AgentIntegration(unittest.TestCase):
         records = self.api('plugin.list')['data']
         external = [r for r in records if r.get('source', {}).get('type') != 'builtin']
         (ROOT / '.artifacts/existing-plugin-states.json').write_text(json.dumps(external, indent=2))
-        self.assertGreaterEqual(len(external), len(packages) + 1, external)
+        expected = {p if isinstance(p, str) else p['package'] for p in packages} | {str(ROOT)}
+        self.assertGreaterEqual(len(external), len(expected), external)
         self.assertTrue(all(r.get('state', {}).get('status') == 'active' for r in external), external)
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-2000:])
 

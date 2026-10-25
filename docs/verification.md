@@ -1,7 +1,8 @@
 # Verification and review
 
 Verified on this host: OpenCode v2.1.3, bubblewrap 0.13.1, Node v26.12.1,
-Linux x86-64. Implementation is staged, not globally installed.
+Linux x86-64. Installed globally on 2026-10-25 after Deniz explicitly approved
+applying the tested preview and restarting OpenCode.
 
 ## Commands actually run
 
@@ -62,3 +63,25 @@ review; it was verified with real socket/Node/npm tests, not a second review.
 The old missing-wrapper probe intentionally retains its failing assertion.
 It is evidence that the original architecture is unsafe on this binary, not a
 failure in the replacement implementation's test suite.
+
+## Approved rollout
+
+- Backed up the original config to
+  `/home/deniz/.config/opencode/opencode.json.bak.20261025-114144-800083`.
+- Atomically installed the reviewed preview as the global config.
+- `opencode service restart` completed outside the outer Codex sandbox.
+- Live service status returned `http://127.0.0.1:49374`.
+- Live plugin registry reported `local.goal-mode.server`, `superpowers` and
+  `opencode-workspace-sandbox` active.
+- Live permission API evaluation: native `shell` **deny**, `sandbox_shell`
+  **allow**. The empty verification session was removed afterward, without
+  invoking a model.
+- Installed config SHA256:
+  `36c450e836a7d20852a3c8fe97417659db8c7ded42ab84809b3d86d892a098aa`.
+- Final default-scratch smoke: workspace write succeeded, host write failed with
+  a read-only filesystem error, exit 0; disposable data was removed afterward.
+- Post-install `npm run test:opencode`: all 11 real-OpenCode scenarios passed
+  again, including compatibility with the already-installed sandbox plugin.
+
+Rollback: restore that backup to `~/.config/opencode/opencode.json` and run
+`opencode service restart`. The repository remains at its stable plugin path.
