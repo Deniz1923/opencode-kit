@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Optional preferences matching Deniz's installation. Merge deliberately into
+  // an existing configuration. This file alone does not enable the sandbox.
+  "share": "manual",
+  "instructions": [],
+  "experimental": {
+    "todo": true,
+    "subagent_depth": 2
+  },
+  // Optional executable plugins. These run host-side and are separate from the
+  // data-only agent packs. The kit preserves these when you select the sandbox.
+  "plugins": [
+    "@prevalentware/opencode-goal-plugin",
+    "superpowers@git+https://github.com/obra/superpowers.git"
+  ]
+}

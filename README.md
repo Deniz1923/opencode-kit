@@ -4,8 +4,9 @@ Choose a Linux sandbox, Deniz's agents, another author's agents, or a combinatio
 Existing settings stay in place. Conflicts offer **keep, replace, or rename**;
 noninteractive installation stops when a choice is missing.
 
-Local release candidate: no public GitHub/npm release exists yet. The package is
-marked private to prevent accidental publication. License: MIT.
+Source: [Deniz1923/opencode-kit](https://github.com/Deniz1923/opencode-kit), a private
+repository. GitHub access is required to clone it. The npm package is marked
+private to prevent accidental registry publication. License: MIT.
 
 ## Install
 
@@ -14,9 +15,11 @@ Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
 versions are rejected until compatibility is tested. Agent prompts are ordinary
 text; this installer and OS sandbox target Linux only.
 
-Inside the downloaded/cloned checkout:
+Clone using an authenticated GitHub account that has access:
 
 ```sh
+gh repo clone Deniz1923/opencode-kit
+cd opencode-kit
 npm ci --ignore-scripts
 node cli.mjs init
 ```
@@ -24,6 +27,10 @@ node cli.mjs init
 The menu offers sandbox + Deniz agents + workflow, sandbox only, or agents only.
 It previews changes, asks before applying/restarting, and makes private backups.
 It does not install or rebuild OpenCode. Flags allow independent selections:
+
+[Deniz's setup notes](docs/deniz-setup.md) record the active roles, optional plugins
+and non-secret preferences. Live credentials, installation paths, session data,
+backups and runtime state are excluded from this repository.
 
 ```sh
 # Preview only. No live configuration changes.
@@ -178,5 +185,5 @@ Real namespace/server tests need a compatible host permitting unprivileged bwrap
 CI runs data/installer checks; full host checks remain a release requirement.
 The historical `test/probe_opencode.py` wrapper diagnostic intentionally fails
 its missing-wrapper assertion on 2.1.3; it is excluded from the passing suite.
-Choose the repository and public package name before publication. The package
-excludes credentials, live configs, backups, development artifacts and history.
+Public repository visibility and npm publication remain separate decisions. The
+package excludes credentials, live configs, backups, development artifacts and history.
