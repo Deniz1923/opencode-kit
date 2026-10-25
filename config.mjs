@@ -3,6 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { INSTALL_DIR } from './sandbox.mjs';
+import { defaultPolicy, explicitlyDenied } from './defaults.mjs';
+import { policyPaths } from './policy.mjs';
 
 const DROP = new Set(['list', 'todowrite', 'lsp', 'doom_loop']);
 function rules(value) {
@@ -27,14 +29,15 @@ function pluginTarget(entry) {
   return spec.replace(/(?<!^)@.*$/, '');
 }
 
-export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL_DIR } = {}) {
+export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL_DIR, accessPolicy, paths = policyPaths(home, {}) } = {}) {
   if (!path.isAbsolute(home) || !path.isAbsolute(pluginPath)) throw new Error('home and pluginPath must be absolute');
   const out = structuredClone(input);
   out.experimental = { ...out.experimental };
   if (out.subagent_depth !== undefined) out.experimental.subagent_depth = out.subagent_depth;
   delete out.subagent_depth;
   out.agents = Object.fromEntries(Object.entries(out.agents ?? out.agent ?? {}).map(([name, raw]) => {
-    const agent = { ...raw, system: raw.system ?? raw.prompt };
+    const agent = { ...raw };
+    if (raw.system !== undefined || raw.prompt !== undefined) agent.system = raw.system ?? raw.prompt;
     delete agent.prompt;
     agent.permissions = rules(raw.permissions ?? raw.permission);
     delete agent.permission;
@@ -44,12 +47,29 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
     return [name, agent];
   }));
   delete out.agent;
+  const profile = accessPolicy ?? defaultPolicy(out.agents);
+  for (const [id, access] of Object.entries(profile.agents)) {
+    if (!out.agents[id] && !['plan', 'explore'].includes(id)) continue;
+    const agent = out.agents[id] ?? { permissions: [] };
+    const additions = [];
+    if (access.profile !== 'workspace-write' && !explicitlyDenied(agent.permissions, 'edit')) {
+      additions.push({ action: 'edit', resource: '*', effect: 'deny' });
+      for (const root of access.planningRoots) {
+        additions.push({ action: 'edit', resource: root + '/**', effect: 'allow' },
+          { action: 'edit', resource: '**/' + root + '/**', effect: 'allow' });
+      }
+      additions.push({ action: 'edit', resource: profile.scratchRoot + '/**', effect: 'allow' });
+    }
+    if (!access.shell) additions.push({ action: 'sandbox_shell', resource: '*', effect: 'deny' });
+    if (access.escape === 'deny') additions.push({ action: 'shell_unsandboxed', resource: '*', effect: 'deny' });
+    agent.permissions = enforce(agent.permissions, additions); out.agents[id] = agent;
+  }
   const additions = [
     { action: 'shell', resource: '*', effect: 'deny' },
     { action: 'sandbox_shell', resource: '*', effect: 'allow' },
     { action: 'shell_unsandboxed', resource: '*', effect: 'ask' },
     { action: 'external_directory', resource: '*', effect: 'ask' },
-    { action: 'external_directory', resource: '/tmp/opencode/sandbox/*', effect: 'allow' },
+    { action: 'external_directory', resource: profile.scratchRoot + '/*', effect: 'allow' },
     { action: 'webfetch', resource: '*', effect: 'ask' },
     { action: 'websearch', resource: '*', effect: 'ask' },
     { action: 'read', resource: '*.env', effect: 'deny' },
@@ -65,7 +85,7 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   for (const name of ['.git-credentials', '.netrc', '.npmrc', '.pypirc', '.claude.json', '.config/opencode/service.json']) {
     for (const action of ['read', 'edit']) additions.push({ action, resource: path.join(home, name), effect: 'deny' });
   }
-  const immutable = [path.join(home, '.config/opencode'), path.join(home, '.cache/opencode'), pluginPath];
+  const immutable = [...new Set([path.join(home, '.config/opencode'), paths.configDir, path.join(home, '.cache/opencode'), paths.kitConfig, paths.store, pluginPath])];
   for (const name of immutable) additions.push({ action: 'edit', resource: name + '/**', effect: 'deny' });
   out.permissions = enforce(rules(out.permissions ?? out.permission), additions);
   delete out.permission;

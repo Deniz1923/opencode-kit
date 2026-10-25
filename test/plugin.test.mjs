@@ -3,13 +3,23 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import plugin from '../index.js';
+import { createPlugin } from '../index.js';
 
 function host(t, { deny = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-plugin-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'project'); fs.mkdirSync(workspace);
   const tools = new Map(), hooks = new Map(); const requests = [];
+  fs.mkdirSync(path.join(root, 'config'));
+  const policyFile = path.join(root, 'config/policy.json');
+  fs.writeFileSync(policyFile, JSON.stringify({schemaVersion:1,scratchRoot:path.join(root,'scratch'),agents:{
+    build:{profile:'workspace-write',shell:true,escape:'ask'},
+    plan:{profile:'planner',shell:true,escape:'deny'},
+    explore:{profile:'read-only',shell:true,escape:'deny'},
+    'foreign/reviewer':{profile:'read-only',shell:true,escape:'deny'},
+    'strict/reviewer':{profile:'read-only',shell:false,escape:'deny'}
+  }}), {mode:0o600});
+  const plugin = createPlugin({ policyFile });
   const ctx = {
     options: { scratchRoot: path.join(root, 'scratch') },
     location: { directory: workspace, project: { canonical: workspace } },
@@ -21,11 +31,11 @@ function host(t, { deny = false } = {}) {
     tool: { transform: async fn => fn({ add: tool => tools.set(tool.name, tool) }) },
   };
   const toolCtx = { sessionID: 'ses_test', agent: 'build', messageID: 'msg_test', id: 'call_test', signal: new AbortController().signal };
-  return { root, workspace, tools, hooks, requests, ctx, toolCtx };
+  return { root, workspace, tools, hooks, requests, ctx, toolCtx, plugin, policyFile };
 }
 
 test('sandbox tool executes quoted commands inside the trusted session workspace', async t => {
-  const h = host(t); await plugin.setup(h.ctx);
+  const h = host(t); await h.plugin.setup(h.ctx);
   const result = await h.tools.get('sandbox_shell').execute({ command: "printf '%s' 'a; $(touch bad)'; touch okay" }, h.toolCtx);
   assert.equal(result.metadata.exit_code, 0, result.content);
   assert.ok(result.content.includes('a; $(touch bad)'));
@@ -35,14 +45,14 @@ test('sandbox tool executes quoted commands inside the trusted session workspace
 });
 
 test('denied escapes never spawn and propagate the rejection reason', async t => {
-  const h = host(t, { deny: true }); await plugin.setup(h.ctx);
+  const h = host(t, { deny: true }); await h.plugin.setup(h.ctx);
   const marker = path.join(h.root, 'must-not-exist');
   await assert.rejects(h.tools.get('shell_unsandboxed').execute({ command: 'touch ' + marker }, h.toolCtx), /User rejected/);
   assert.ok(!fs.existsSync(marker));
 });
 
 test('permitted escapes run only after the permission assertion', async t => {
-  const h = host(t); await plugin.setup(h.ctx);
+  const h = host(t); await h.plugin.setup(h.ctx);
   const marker = path.join(h.root, 'approved');
   const r = await h.tools.get('shell_unsandboxed').execute({ command: 'touch ' + marker + '; printf approved' }, h.toolCtx);
   assert.equal(r.metadata.exit_code, 0);
@@ -53,7 +63,7 @@ test('permitted escapes run only after the permission assertion', async t => {
 });
 
 test('escape approval and execution use the same requested working directory', async t => {
-  const h = host(t); await plugin.setup(h.ctx);
+  const h = host(t); await h.plugin.setup(h.ctx);
   const sub = path.join(h.workspace, 'sub'); fs.mkdirSync(sub);
   const r = await h.tools.get('shell_unsandboxed').execute({ command: 'touch relative-file; pwd', workdir: sub }, h.toolCtx);
   assert.equal(r.metadata.exit_code, 0);
@@ -63,17 +73,41 @@ test('escape approval and execution use the same requested working directory', a
 });
 
 test('escape evaluation preserves deny and forces allowed decisions to ask', async t => {
-  const h = host(t); await plugin.setup(h.ctx);
+  const h = host(t); await h.plugin.setup(h.ctx);
   const hook = h.hooks.get('evaluate');
   for (const [effect, wanted] of [['allow', 'ask'], ['ask', 'ask'], ['deny', 'deny']]) {
-    const e = { action: 'shell_unsandboxed', effect }; hook(e); assert.equal(e.effect, wanted);
+    const e = { action: 'shell_unsandboxed', effect, agent: 'build', sessionID: 'ses_test' }; await hook(e); assert.equal(e.effect, wanted);
   }
 });
 
 test('read-only agents cannot escape even when host permission rules are permissive', async t => {
-  const h = host(t); await plugin.setup(h.ctx);
+  const h = host(t); await h.plugin.setup(h.ctx);
   await assert.rejects(h.tools.get('shell_unsandboxed').execute({ command: 'touch forbidden' }, { ...h.toolCtx, agent: 'explore' }), /cannot.*escape/i);
   const r = await h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, { ...h.toolCtx, agent: 'explore' });
   assert.notEqual(r.metadata.exit_code, 0);
+  assert.ok(!fs.existsSync(path.join(h.workspace, 'forbidden')));
+});
+
+test('foreign agent profiles restrict shell writes and preserve explicit terminal denial', async t => {
+  const h = host(t); h.ctx.options.agentPolicies = { 'foreign/reviewer': { profile: 'workspace-write' } };
+  await h.plugin.setup(h.ctx);
+  const reader = { ...h.toolCtx, agent: 'foreign/reviewer' };
+  const r = await h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, reader);
+  assert.notEqual(r.metadata.exit_code, 0); assert.ok(!fs.existsSync(path.join(h.workspace, 'forbidden')));
+  await assert.rejects(h.tools.get('shell_unsandboxed').execute({ command: 'touch forbidden' }, reader), /cannot.*escape/i);
+  await assert.rejects(h.tools.get('sandbox_shell').execute({ command: 'true' }, { ...h.toolCtx, agent: 'strict/reviewer' }), /terminal|shell.*denied/i);
+});
+
+test('native edit permission guard allows plans but denies source for Planner', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  for (const [target, wanted] of [['src/main.js', 'deny'], ['docs/superpowers/plans/plan.md', 'allow']]) {
+    const event = { action: 'edit', effect: 'allow', agent: 'plan', sessionID: 'ses_test', resources: [target] };
+    await h.hooks.get('evaluate')(event); assert.equal(event.effect, wanted);
+  }
+});
+
+test('missing policy stops execution instead of guessing agent privileges', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx); fs.unlinkSync(h.policyFile);
+  await assert.rejects(h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, h.toolCtx), /policy.*missing|setup/i);
   assert.ok(!fs.existsSync(path.join(h.workspace, 'forbidden')));
 });

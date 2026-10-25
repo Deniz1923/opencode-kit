@@ -2,9 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runSandbox, runProcess, inside } from './sandbox.mjs';
-
-export const READ_ONLY_AGENTS = new Set(['plan', 'explore', 'code-reviewer', 'debugger', 'test-engineer']);
-const NO_ESCAPE = new Set(['plan', 'explore', 'code-reviewer', 'debugger']);
+import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths } from './policy.mjs';
 const inputSchema = {
   type: 'object',
   properties: {
@@ -23,15 +21,31 @@ function source(tool) {
   return { type: 'tool', messageID: tool.messageID, id: tool.id };
 }
 
-export default {
+export function createPlugin({ policyFile = policyPaths().policy } = {}) { return {
   id: 'opencode-workspace-sandbox',
   async setup(ctx) {
-    const options = ctx.options ?? {};
-    await ctx.permission.hook('evaluate', event => {
-      if (event.action === 'shell_unsandboxed' && event.effect === 'allow') {
-        event.effect = 'ask';
-        event.message = 'Run this exact command outside the sandbox with your full user authority?';
-      }
+    // Authority comes from an owned user policy file, never a project's plugin options.
+    await ctx.permission.hook('evaluate', async event => {
+      if (event.effect === 'deny' || !['edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;
+      try {
+        const policy = loadPolicy(policyFile);
+        const scope = await sessionScope({ sessionID: event.sessionID });
+        const access = agentAccess(policy, event.agent ?? scope.agent);
+        if (event.action === 'sandbox_shell' && !access.shell) {
+          event.effect = 'deny'; event.message = 'Agent terminal access is denied by kit policy';
+        } else if (event.action === 'shell_unsandboxed') {
+          event.effect = access.escape === 'ask' ? 'ask' : 'deny';
+          event.message = access.escape === 'ask' ? 'Run this exact command outside the sandbox with your full user authority?' : 'This agent cannot request a sandbox escape';
+        } else if (event.action === 'edit') {
+          const scratch = scratchPath(scope.workspace, canonicalTarget(policy.scratchRoot));
+          const denied = !event.resources?.length || event.resources.some(resource => {
+            const target = canonicalTarget(path.resolve(scope.directory, resource));
+            const paths = policyPaths();
+            return inside(target, path.dirname(policyFile)) || inside(target, paths.store) || !canEdit(access, target, { workspace: scope.workspace, scratch });
+          });
+          if (denied) { event.effect = 'deny'; event.message = 'File write is outside this agent’s approved output locations'; }
+        }
+      } catch (error) { event.effect = 'deny'; event.message = error.message; }
     });
     async function sessionScope(tool) {
       const session = await ctx.session.get({ sessionID: tool.sessionID });
@@ -42,7 +56,7 @@ export default {
         const root = fs.realpathSync(canonical);
         if (inside(directory, root) && !inside(os.homedir(), root)) workspace = root;
       }
-      return { directory, workspace };
+      return { directory, workspace, agent: typeof session.agent === 'string' ? session.agent : session.agent?.id };
     }
     async function assertPermission(action, input, tool, cwd) {
       await ctx.permission.assert({
@@ -57,15 +71,18 @@ export default {
         description: 'Execute terminal commands in the trusted workspace using bubblewrap. Workspace and private scratch are writable; host filesystem and Git metadata are read-only. No network, host runtime sockets or GPU devices. Use this tool for terminal work; the built-in shell is denied. Retry a sandbox restriction using shell_unsandboxed with a reason; the user must approve. Commands can delete workspace files. Read-only agents receive a read-only workspace.',
         input: inputSchema, options: { codemode: false },
         execute: async (input, tool) => {
+          const policy = loadPolicy(policyFile); const access = agentAccess(policy, tool.agent);
+          if (!access.shell) throw new Error('Agent terminal access is denied by kit policy');
           await assertPermission('sandbox_shell', input, tool);
           const { directory, workspace } = await sessionScope(tool);
           try {
             return toolResult(await runSandbox({
               workspace, cwd: input.workdir ?? directory, command: input.command,
               timeout: input.timeout, signal: tool.signal,
-              readOnly: READ_ONLY_AGENTS.has(tool.agent),
-              ...(options.scratchRoot ? { scratchRoot: options.scratchRoot } : {}),
-              ...(options.maskedPaths ? { maskedPaths: options.maskedPaths } : {}),
+              readOnly: access.profile !== 'workspace-write',
+              writablePaths: access.planningRoots,
+              scratchRoot: policy.scratchRoot,
+              protectedPaths: [path.dirname(policyFile), policyPaths().store],
             }));
           } catch (error) {
             return toolResult({ content: error.message, exit_code: 125, truncated: false });
@@ -77,11 +94,12 @@ export default {
         description: 'Request approval to execute an exact shell command OUTSIDE the sandbox with full host filesystem, credentials, network and device access. Use only after a sandbox restriction or an explicit user request. Every execution asks; no saved approval is requested.',
         input: inputSchema, options: { codemode: false },
         execute: async (input, tool) => {
-          if (NO_ESCAPE.has(tool.agent)) throw new Error('This agent cannot request a sandbox escape');
+          if (agentAccess(loadPolicy(policyFile), tool.agent).escape !== 'ask') throw new Error('This agent cannot request a sandbox escape');
           const { directory } = await sessionScope(tool);
           const cwd = fs.realpathSync(path.resolve(directory, input.workdir ?? directory));
           if (!fs.statSync(cwd).isDirectory() || /[\r\n\0]/.test(cwd)) throw new Error('Invalid escape working directory');
           await assertPermission('shell_unsandboxed', input, tool, cwd);
+          if (agentAccess(loadPolicy(policyFile), tool.agent).escape !== 'ask') throw new Error('This agent cannot request a sandbox escape');
           return toolResult(await runProcess('/bin/bash', ['--noprofile', '--norc', '-c', input.command], {
             cwd, timeout: input.timeout, signal: tool.signal,
           }));
@@ -89,4 +107,6 @@ export default {
       });
     });
   },
-};
+}; }
+
+export default createPlugin();

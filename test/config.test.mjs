@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { migrateConfig } from '../config.mjs';
+import { defaultPolicy } from '../defaults.mjs';
 
 const source = {
   model: 'provider/model', default_agent: 'build', share: 'manual', instructions: [],
@@ -51,4 +52,17 @@ test('migration is idempotent and preserves custom V2 settings and policies', ()
   const once = migrateConfig({ ...source, policies: [{ action: 'provider.use', resource: 'blocked', effect: 'deny' }] }, opts);
   assert.deepEqual(migrateConfig(once, opts), once);
   assert.ok(once.policies.some(r => r.resource === 'blocked'));
+});
+
+test('planner and imported reviewer rules agree with selected access profiles', () => {
+  const c = migrateConfig({ agents: {
+    plan: { mode: 'primary' },
+    'other/reviewer': { mode: 'subagent', permissions: [{ action: 'edit', resource: '*', effect: 'deny' }, { action: 'shell', resource: '*', effect: 'deny' }] },
+  } }, opts);
+  const p = defaultPolicy(c.agents);
+  assert.equal(p.agents.plan.profile, 'planner');
+  assert.ok(c.agents.plan.permissions.some(r => r.action === 'edit' && r.resource === '*' && r.effect === 'deny'));
+  assert.ok(c.agents.plan.permissions.some(r => r.action === 'edit' && r.resource === 'docs/superpowers/plans/**' && r.effect === 'allow'));
+  assert.ok(c.agents['other/reviewer'].permissions.some(r => r.action === 'sandbox_shell' && r.effect === 'deny'));
+  assert.ok(c.agents['other/reviewer'].permissions.some(r => r.action === 'shell_unsandboxed' && r.effect === 'deny'));
 });
