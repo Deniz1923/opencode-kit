@@ -23,6 +23,12 @@ class ScriptedModel(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.requests.append(body)
+        if getattr(self.server, 'reject_titles', False) and any('Reply with only the title.' in str(m.get('content')) for m in body.get('messages', [])):
+            self.send_response(429)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': {'type': 'FreeUsageLimitError', 'message': 'Synthetic title quota limit'}}).encode())
+            return
         tools = [item['function']['name'] for item in body.get('tools', [])]
         messages = body.get('messages', [])
         has_result = bool(messages and messages[-1].get('role') == 'tool')
@@ -134,6 +140,51 @@ class AgentIntegration(unittest.TestCase):
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-4000:])
         self.assertIn('sandbox-result', json.dumps(context))
         self.assertIn('exit_code', json.dumps(context))
+
+    def test_title_quota_failure_gets_a_local_title_and_the_normal_reply_still_succeeds(self):
+        self.model.reject_titles = True
+        self.config()
+        sid = self.begin(); context, _ = self.finish(sid)
+        for _ in range(50):
+            session = self.api('/api/session/' + sid)['data']
+            if session.get('title'): break
+            time.sleep(.02)
+        self.assertEqual(session.get('title'), 'Execute the configured test tool now')
+        self.assertTrue((self.project / 'okay').exists())
+        self.assertIn('TOOL_COMPLETE', json.dumps(context))
+
+    def test_chat_avoids_workflow_context_but_keeps_file_web_and_sandbox_tools(self):
+        injector = self.root / 'workflow-fixture'; injector.mkdir()
+        (injector / 'package.json').write_text('{"type":"module"}')
+        bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\nThe using-superpowers skill content is included below.\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>'
+        (injector / 'index.js').write_text('export default {id:"workflow-fixture",async setup(ctx){await ctx.session.hook("context",e=>{'
+            + 'e.system.push({type:"text",text:"OpenCode goal mode policy:\\n- Manage goals only through the goal tools."});'
+            + 'const user=e.messages.find(m=>m.role==="user");if(user)user.content.unshift({type:"text",text:' + json.dumps(bootstrap) + '});'
+            + '});}};')
+        self.config(agent='chat', existing_plugins=[str(injector)])
+        target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
+        pack = subprocess.run(['node', '--input-type=module', '-e',
+            'import {readAgentPack} from "./kit/packs.mjs"; console.log(JSON.stringify(readAgentPack("./packs/deniz-agents").agents["deniz/chat"]));'],
+            cwd=ROOT, capture_output=True, text=True, check=True)
+        config['agents']['chat'] = json.loads(pack.stdout)
+        config.setdefault('experimental', {})['todo'] = True
+        target.write_text(json.dumps(config))
+        context, _ = self.finish(self.begin())
+        self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-3000:])
+        # Startup warming may use the provider independently of this Chat turn.
+        requests = [r for r in self.model.requests if r.get('tools') and any(
+            m.get('role') == 'user' and 'Execute the configured test tool now.' in str(m.get('content'))
+            for m in r.get('messages', []))]
+        request = max(requests, key=lambda r: len(json.dumps(r)))
+        names = {item['function']['name'] for item in request.get('tools', [])}
+        self.assertTrue({'read', 'edit', 'write', 'glob', 'grep', 'webfetch', 'websearch', 'sandbox_shell', 'shell_unsandboxed'} <= names, names)
+        self.assertFalse({'subagent', 'skill', 'todowrite', 'execute'} & names, names)
+        self.assertFalse(any(name.startswith('opencode_') for name in names), names)
+        self.assertFalse(any('goal' in name for name in names), names)
+        sent = json.dumps(request['messages'])
+        self.assertNotIn('You have superpowers.', sent)
+        self.assertNotIn('OpenCode goal mode policy:', sent)
+        self.assertIn('Execute the configured test tool now.', sent)
 
     def test_external_write_is_blocked(self):
         marker = ARTIFACTS / ('outside-' + self.root.name)

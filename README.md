@@ -10,7 +10,7 @@ private to prevent accidental registry publication. License: MIT.
 
 ## Install
 
-Requirements: **Linux x86-64**, OpenCode **2.1.3**, bubblewrap **0.13.1**, Git,
+Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4 or 2.2.1**, bubblewrap **0.13.1**, Git,
 Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
 versions are rejected until compatibility is tested. Agent prompts are ordinary
 text; this installer and OS sandbox target Linux only.
@@ -78,6 +78,56 @@ node cli.mjs init --sandbox --profile team/builder=workspace-write \
 Review the printed profiles. Host escape always requires approval. Defaults are
 writer for Build/General/Chat, planner for Plan, reader for review/exploration.
 The test engineer may request an approved host escape.
+
+## Chat without coding overhead
+
+The Deniz Chat agent keeps its original conversational prompt and model choice.
+It can use web search, read/search/edit files, and run sandboxed commands when
+requested. It does not load skills, delegate to subagents, manage autonomous
+goals/todos, or use Code Mode's host utilities. Build and Plan keep their tools
+and workflows. Host escapes retain their existing approval rules.
+
+With the kit sandbox plugin loaded after Superpowers and the goal plugin, Chat
+also omits their unused bootstrap and generic goal-policy reminder from model
+requests. Stored history and normal user/project instructions are preserved.
+This is context trimming, not a shorter-answer prompt or a reasoning limit.
+The plugin recognizes `chat` and namespaced roles ending in `/chat`. It trims
+only when both skill and subagent permissions are denied. Denied workflow tools
+are explicitly omitted even on hosts that advertise them. Restoring either tool
+also restores the workflow context. An agents-only installation disables
+those tools but cannot remove another plugin's injected context.
+
+For an existing Chat agent, append these permission rules; keep its system prompt:
+
+```json
+[
+  { "action": "subagent", "resource": "*", "effect": "deny" },
+  { "action": "skill", "resource": "*", "effect": "deny" },
+  { "action": "*goal*", "resource": "*", "effect": "deny" },
+  { "action": "todo*", "resource": "*", "effect": "deny" },
+  { "action": "execute", "resource": "*", "effect": "deny" }
+]
+```
+
+In a fresh-session local-model measurement with Deniz's two optional plugins,
+message and tool-schema JSON fell from 45,634 to 11,165 characters (about 76%).
+This measures fixed request overhead, not billed tokens or answer quality.
+Long histories and file/web results still consume context. Start a new Chat
+session for an unrelated topic; switching an existing coding session to Chat
+does not erase its history. Automatic compaction remains at OpenCode's defaults.
+
+## Titles when the provider limits requests
+
+The provider can reject an automatic title request with `429 FreeUsageLimitError`
+while still accepting the normal reply. For that specific failure, the plugin
+sets an untitled session's title locally from the first meaningful line of the
+outgoing title request (up to 12 words/80 characters). This is a simple text
+excerpt, not an AI summary. Successful AI titles and existing manual titles keep
+their normal behavior; primary responses and errors are not rewritten.
+
+The fallback makes no additional model calls and does not read session history
+or scan existing chats. It keeps only bounded candidate titles in memory while
+requests are pending, and performs no historical title backfill.
 
 ## Make an agent pack
 

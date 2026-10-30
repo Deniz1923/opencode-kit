@@ -5,7 +5,7 @@ import { planInstall, listInstalled } from './install.mjs';
 import { loadPolicy } from '../policy.mjs';
 import { runSandbox } from '../sandbox.mjs';
 
-export const TESTED = { opencode: '2.1.3', bwrap: '0.13.1' };
+export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1'], bwrap: ['0.13.1'] };
 export const supportedPlatform = (platform = process.platform, arch = process.arch) => platform === 'linux' && arch === 'x64';
 function version(command) {
   const r = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
@@ -16,7 +16,7 @@ export function checkCompatibility() {
   if (!supportedPlatform()) throw new Error('Installer and sandbox support Linux x86-64 only');
   if (Number(process.versions.node.split('.')[0]) < 22) throw new Error('Node.js 22 or later is required; tested with Node.js 26');
   const result = { opencode: version('opencode'), bwrap: version('/usr/bin/bwrap') };
-  for (const key of Object.keys(TESTED)) if (result[key] !== TESTED[key]) throw new Error(`Untested ${key} version ${result[key]}; this release requires ${TESTED[key]}`);
+  for (const key of Object.keys(TESTED)) if (!TESTED[key].includes(result[key])) throw new Error(`Untested ${key} version ${result[key]}; this release requires ${TESTED[key].join(' or ')}`);
   return result;
 }
 export async function doctor(paths, { execute = true } = {}) {

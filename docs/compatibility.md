@@ -2,6 +2,18 @@
 
 Date: 2026-10-25
 
+Update, 2026-10-30: OpenCode 2.2.1 advertises the skill tool even with a broad
+Chat skill denial. The Chat filter now checks resolved agent permissions,
+handles wrapped agent metadata, and removes denied workflow definitions before
+model dispatch. Core host utilities are also omitted from Chat when Code Mode
+is denied. The global skills menu remains available to other agents.
+
+Update, 2026-10-28: the plugin-owned shell architecture also passes all 20 real
+OpenCode integration tests on 2.1.4, including Chat context/tool selection.
+The installer explicitly accepts 2.1.3 and 2.1.4; other versions still require
+testing. The wrapper-fallback investigation below records the original 2.1.3
+result and does not imply that its separate failing probe was rerun on 2.1.4.
+
 ## Result: the saved wrapper architecture cannot be installed as designed
 
 The configured wrapper **is supported once the location configuration has

@@ -24,7 +24,10 @@ function host(t, { deny = false } = {}) {
   const ctx = {
     options: { scratchRoot: path.join(root, 'scratch') },
     location: { directory: workspace, project: { canonical: workspace } },
-    session: { get: async () => ({ location: { directory: workspace } }) },
+    agent: { get: async () => ({ permissions: ['skill', 'subagent', 'execute', 'todo*', '*goal*'].map(action => ({ action, resource: '*', effect: 'deny' })) }) },
+    session: { get: async () => ({ location: { directory: workspace } }),
+      context: async () => [{ type: 'user', text: 'Explain this fully.' }],
+      hook: async (name, fn) => hooks.set('session:' + name, fn) },
     permission: {
       hook: async (name, fn) => hooks.set(name, fn),
       assert: async input => { requests.push(input); if (deny) throw new Error('User rejected this request'); },
@@ -34,6 +37,99 @@ function host(t, { deny = false } = {}) {
   const toolCtx = { sessionID: 'ses_test', agent: 'build', messageID: 'msg_test', id: 'call_test', signal: new AbortController().signal };
   return { root, workspace, tools, hooks, requests, ctx, toolCtx, plugin, policyFile };
 }
+
+const bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\n\n**IMPORTANT: The using-superpowers skill content is included below. It is ALREADY LOADED**\nWorkflow instructions\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>';
+function chatContext(agent = 'chat') {
+  return { agent, system: [{ type: 'text', text: 'Keep the user’s answer style.' },
+    { type: 'text', text: 'OpenCode goal mode policy:\n- Manage goals only through the goal tools.\nGeneric goal instructions.' }],
+  messages: [{ role: 'user', content: [{ type: 'text', text: bootstrap }, { type: 'text', text: 'Explain this fully.' }] }],
+  tools: { read: {}, edit: {}, websearch: {}, sandbox_shell: {}, shell_unsandboxed: {} }, options: { maxTokens: 8192 } };
+}
+test('lean Chat removes only unused workflow injections and keeps practical tools and answer settings', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
+  const event = chatContext(); const tools = structuredClone(event.tools);
+  await hook(event);
+  assert.deepEqual(event.messages[0].content, [{ type: 'text', text: 'Explain this fully.' }]);
+  assert.deepEqual(event.system, [{ type: 'text', text: 'Keep the user’s answer style.' }]);
+  assert.deepEqual(event.tools, tools); assert.deepEqual(event.options, { maxTokens: 8192 });
+});
+test('workflow cleanup leaves Build and unrelated agents untouched', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
+  for (const agent of ['build', 'somebody/researcher']) {
+    const event = chatContext(agent), original = structuredClone(event); await hook(event); assert.deepEqual(event, original);
+  }
+});
+test('cleanup preserves deliberate skill access, user quotations, and available goal instructions', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
+  const withSkills = chatContext(); withSkills.tools.skill = {};
+  const getAgent = h.ctx.agent.get;
+  h.ctx.agent.get = async () => ({ permissions: [{ action: 'skill', resource: '*', effect: 'allow' }] });
+  const original = structuredClone(withSkills); await hook(withSkills); assert.deepEqual(withSkills, original);
+  h.ctx.agent.get = getAgent;
+  const quote = chatContext('deniz/chat'); quote.messages[0].content = [{ type: 'text', text: bootstrap }];
+  h.ctx.session.context = async () => [{ type: 'user', text: bootstrap }];
+  h.ctx.agent.get = async () => ({ permissions: ['skill', 'subagent'].map(action => ({ action, resource: '*', effect: 'deny' })) });
+  quote.tools.get_goal = {}; await hook(quote);
+  assert.equal(quote.messages[0].content[0].text, bootstrap);
+  assert.equal(quote.system.length, 2);
+});
+test('Chat omits workflow tools even when the host advertises denied definitions', async t => {
+  const h = host(t); const getAgent = h.ctx.agent.get;
+  h.ctx.agent.get = async () => ({ location: { directory: h.workspace }, data: await getAgent() });
+  await h.plugin.setup(h.ctx); const event = chatContext();
+  Object.assign(event.tools, { skill: {}, subagent: {}, execute: {}, todowrite: {}, create_goal: {}, opencode_session_move: {} });
+  await h.hooks.get('session:context')(event);
+  assert.deepEqual(Object.keys(event.tools).sort(), ['edit','read','sandbox_shell','shell_unsandboxed','websearch']);
+  assert.equal(event.messages[0].content.length, 1);
+});
+test('a user quotation with an attachment is preserved using stored user text', async t => {
+  const h = host(t); h.ctx.session.context = async () => [{ type: 'user', text: bootstrap }];
+  await h.plugin.setup(h.ctx); const event = chatContext();
+  event.messages[0].content = [{ type: 'text', text: bootstrap }, { type: 'image', image: 'fixture' }];
+  const original = structuredClone(event.messages);
+  await h.hooks.get('session:context')(event); assert.deepEqual(event.messages, original);
+});
+test('bootstrap-only synthetic messages after compaction can be removed for namespaced Chat', async t => {
+  const h = host(t); h.ctx.session.context = async () => [{ type: 'checkpoint', id: 'checkpoint' }];
+  await h.plugin.setup(h.ctx); const event = chatContext('friend/chat');
+  event.messages = [{ role: 'assistant', content: [{ type: 'text', text: 'Checkpoint' }] },
+    { role: 'user', content: [{ type: 'text', text: bootstrap }] }];
+  await h.hooks.get('session:context')(event);
+  assert.deepEqual(event.messages, [{ role: 'assistant', content: [{ type: 'text', text: 'Checkpoint' }] }]);
+});
+test('an unavailable stored transcript preserves uncertain content without breaking Chat', async t => {
+  const h = host(t); h.ctx.session.context = async () => { throw new Error('Unavailable'); };
+  await h.plugin.setup(h.ctx); const event = chatContext(), original = structuredClone(event.messages);
+  await h.hooks.get('session:context')(event); assert.deepEqual(event.messages, original);
+});
+
+test('a quota-rejected title request gets a local title without changing the provider response', async t => {
+  const h = host(t), updates = [];
+  h.ctx.session.update = async value => updates.push(value);
+  await h.plugin.setup(h.ctx);
+  const titleHook = h.hooks.get('session:title'); assert.equal(typeof titleHook, 'function');
+  await titleHook({ sessionID: 'ses_test', messages: [{ role: 'user', content: [{ type: 'text', text: 'Here is the first message of the conversation:\n\n<message>\nHelp me plan a vegetable garden with tomatoes and peppers.\n</message>\n\nReply with only the title.' }] }] });
+  const response = new Response(JSON.stringify({ error: { type: 'FreeUsageLimitError' } }), { status: 429 });
+  const event = { sessionID: 'ses_test', kind: 'title', response };
+  await h.hooks.get('session:http.response')(event);
+  assert.deepEqual(updates, [{ sessionID: 'ses_test', title: 'Plan a vegetable garden with tomatoes and peppers' }]);
+  assert.equal(event.response, response); assert.equal(response.bodyUsed, false);
+});
+test('title fallback leaves manual titles, normal replies, and successful AI titles alone', async t => {
+  const h = host(t), updates = [];
+  h.ctx.session.update = async value => updates.push(value);
+  await h.plugin.setup(h.ctx);
+  const titleHook = h.hooks.get('session:title'); assert.equal(typeof titleHook, 'function');
+  const capture = () => titleHook({ sessionID: 'ses_test', messages: [{ role: 'user', content: [{ type: 'text', text: 'Here is the first message of the conversation:\n\n<message>\nInstall a compiler on Linux\n</message>\n\nReply with only the title.' }] }] });
+  const respond = (kind, status) => h.hooks.get('session:http.response')({sessionID:'ses_test',kind,response:new Response(JSON.stringify({error:{type:'FreeUsageLimitError'}}),{status})});
+  await capture(); await respond('primary',429); assert.equal(updates.length,0);
+  await respond('title',200); assert.equal(updates.length,0);
+  await capture(); h.ctx.session.get = async () => ({ title: 'My own title' });
+  await respond('title',429); assert.equal(updates.length,0);
+});
 
 test('sandbox tool executes quoted commands inside the trusted session workspace', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);

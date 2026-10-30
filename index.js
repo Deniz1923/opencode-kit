@@ -21,9 +21,89 @@ function source(tool) {
   return { type: 'tool', messageID: tool.messageID, id: tool.id };
 }
 
+function localTitle(messages) {
+  const prefix = 'Here is the first message of the conversation:\n\n<message>\n';
+  const suffix = '\n</message>\n\nReply with only the title.';
+  const text = messages?.flatMap(message => message.role === 'user' ? message.content ?? [] : [])
+    .find(part => part.type === 'text' && part.text.startsWith(prefix) && part.text.endsWith(suffix))?.text;
+  if (!text) return;
+  let title = text.slice(prefix.length, -suffix.length).slice(0, 4000).split('\n')
+    .map(line => line.trim().replace(/^#+\s*/, '')).find(line => line && !line.startsWith('```'));
+  if (!title) return;
+  title = title.replace(/^(?:please\s+)?(?:can you\s+|could you\s+)?(?:help me\s+)?/i, '')
+    .split(/[.!?](?:\s|$)/u)[0].replace(/\s+/g, ' ').trim();
+  title = [...title].slice(0, 80).join('').split(/\s+/).slice(0, 12).join(' ').replace(/[.!?]+$/, '');
+  return title ? title[0].toLocaleUpperCase() + title.slice(1) : undefined;
+}
+
 export function createPlugin({ policyFile = policyPaths().policy } = {}) { return {
   id: 'opencode-workspace-sandbox',
   async setup(ctx) {
+    // Store only a bounded candidate from the current outgoing title request.
+    // No transcript reads, historical backfill, model retries, or response rewriting.
+    const pendingTitles = new Map();
+    await ctx.session.hook('title', event => {
+      const title = event.result === undefined && localTitle(event.messages);
+      if (!title) return;
+      pendingTitles.delete(event.sessionID); pendingTitles.set(event.sessionID, title);
+      if (pendingTitles.size > 128) pendingTitles.delete(pendingTitles.keys().next().value);
+    });
+    await ctx.session.hook('http.response', async event => {
+      if (event.kind !== 'title') return;
+      const title = pendingTitles.get(event.sessionID); pendingTitles.delete(event.sessionID);
+      if (!title || event.response.status !== 429) return;
+      try {
+        const body = await event.response.clone().json();
+        if (body?.error?.type !== 'FreeUsageLimitError') return;
+        const current = await ctx.session.get({ sessionID: event.sessionID });
+        if (!current.title) await ctx.session.update({ sessionID: event.sessionID, title });
+      } catch { /* Keep the original provider response and normal chat behavior. */ }
+    });
+    // Presentation only: permission rules select tools; this hook never grants
+    // capabilities or changes user content, answer style, or model settings.
+    await ctx.session.hook('context', async event => {
+      if (event.agent?.split('/').at(-1) !== 'chat') return;
+      const result = await ctx.agent.get({ agentID: event.agent });
+      const agent = result.data ?? result;
+      const denied = action => {
+        let effect;
+        for (const rule of agent.permissions ?? []) {
+          const pattern = rule.action.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+          if (rule.resource === '*' && new RegExp('^' + pattern + '$').test(action)) effect = rule.effect;
+        }
+        return effect === 'deny';
+      };
+      // Newer hosts may advertise a denied tool. Keep authority in permission
+      // rules and independently omit unavailable workflows from model context.
+      for (const name of Object.keys(event.tools ?? {})) {
+        const workflow = ['skill', 'subagent', 'execute'].includes(name) || name.startsWith('todo') || name.includes('goal');
+        if (workflow && denied(name)) delete event.tools[name];
+        if (/^opencode[_.]/.test(name) && denied('execute')) delete event.tools[name];
+      }
+      if (!denied('skill') || !denied('subagent')) return;
+      const firstUser = event.messages?.find(message => message.role === 'user');
+      const first = firstUser?.content?.[0];
+      if (first?.type === 'text'
+        && first.text?.startsWith('<EXTREMELY_IMPORTANT>\nYou have superpowers.\n')
+        && first.text.includes('The using-superpowers skill content is included below.')
+        && first.text.includes('**Tool Mapping for OpenCode:**')
+        && first.text.endsWith('</EXTREMELY_IMPORTANT>')) {
+        try {
+          // Bootstrap parts are transient. A real quotation exists in stored
+          // user text and must survive, including when attachments follow it.
+          const stored = await ctx.session.context({ sessionID: event.sessionID });
+          const userTexts = Array.isArray(stored) ? stored.filter(message => message.type === 'user').map(message => message.text) : null;
+          if (userTexts && userTexts.every(text => typeof text === 'string' && !text.includes(first.text))) {
+            firstUser.content.shift();
+            if (!firstUser.content.length) event.messages.splice(event.messages.indexOf(firstUser), 1);
+          }
+        } catch { /* Preserve uncertain content if transcript lookup fails. */ }
+      }
+      if (!event.tools?.get_goal && !event.tools?.create_goal && Array.isArray(event.system)) {
+        event.system = event.system.filter(part => !(part.type === 'text'
+          && part.text?.startsWith('OpenCode goal mode policy:\n- Manage goals only through the goal tools.')));
+      }
+    });
     // Authority comes from an owned user policy file, never a project's plugin options.
     await ctx.permission.hook('evaluate', async event => {
       if (event.effect === 'deny' || !['edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;

@@ -3,7 +3,8 @@
 This is a reproducible description of the current setup, not a copy of the live
 home directory. Authentication, provider secrets, sessions, private backups and
 machine-specific managed paths are not stored here. Agent prompts are preserved
-as installed; the proposed later prompt cleanup has not been applied.
+as installed. Chat's unused workflow tools and injected reminders are disabled
+as described in the README; its answer style, model and practical tools are kept.
 
 ## Components
 
