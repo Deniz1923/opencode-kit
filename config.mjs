@@ -38,6 +38,15 @@ function previousSandbox(entry) {
   } catch { return false; }
 }
 
+function superpowersEntry(entry) {
+  const target = pluginTarget(entry);
+  if (target === 'superpowers') return true;
+  if (!path.isAbsolute(target)) return false;
+  if (target.endsWith('/integrations/superpowers')) return true;
+  try { return JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8')).name === 'opencode-kit-superpowers'; }
+  catch { return false; }
+}
+
 export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL_DIR, accessPolicy, paths = policyPaths(home, {}) } = {}) {
   if (!path.isAbsolute(home) || !path.isAbsolute(pluginPath)) throw new Error('home and pluginPath must be absolute');
   const out = structuredClone(input);
@@ -106,6 +115,8 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   out.permissions = enforce(rules(out.permissions ?? out.permission), additions);
   delete out.permission;
   out.plugins = [...(out.plugins ?? [])].filter(entry => (typeof entry === 'string' ? entry : entry.package) !== pluginPath && !previousSandbox(entry));
+  out.plugins = out.plugins.map(entry => superpowersEntry(entry)
+    ? { ...(typeof entry === 'object' ? entry : {}), package: path.join(pluginPath, 'integrations/superpowers') } : entry);
   out.plugins.push({ package: pluginPath });
   const policies = [
     { action: 'tool.use', resource: 'shell:*', effect: 'deny' },

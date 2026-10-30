@@ -87,15 +87,18 @@ requested. It does not load skills, delegate to subagents, manage autonomous
 goals/todos, or use Code Mode's host utilities. Build and Plan keep their tools
 and workflows. Host escapes retain their existing approval rules.
 
-With the kit sandbox plugin loaded after Superpowers and the goal plugin, Chat
-also omits their unused bootstrap and generic goal-policy reminder from model
-requests. Stored history and normal user/project instructions are preserved.
+When Superpowers is configured, the kit installs a managed producer adapter
+using the same upstream 7.0.1 revision recorded in its provenance file. It skips
+the upstream context-injection callback for restricted Chat agents. Build and
+Plan still use that upstream callback, and the original skills stay registered.
+Chat's generic unused goal-policy reminder is also omitted from model requests.
+The adapter does not retrieve stored messages or remove quoted user text.
 This is context trimming, not a shorter-answer prompt or a reasoning limit.
-The plugin recognizes `chat` and namespaced roles ending in `/chat`. It trims
+The plugin recognizes `chat` and namespaced roles ending in `/chat`. It skips injection
 only when both skill and subagent permissions are denied. Denied workflow tools
 are explicitly omitted even on hosts that advertise them. Restoring either tool
 also restores the workflow context. An agents-only installation disables
-those tools but cannot remove another plugin's injected context.
+those tools but cannot prevent another plugin's injected context.
 
 For an existing Chat agent, append these permission rules; keep its system prompt:
 

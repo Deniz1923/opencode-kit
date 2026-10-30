@@ -1,0 +1,6 @@
+{
+  "name": "opencode-kit-superpowers",
+  "type": "module",
+  "private": true,
+  "main": "index.js"
+}

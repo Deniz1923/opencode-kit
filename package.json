@@ -9,7 +9,7 @@
   "license": "MIT",
   "engines": { "node": ">=22" },
   "bin": { "opencode-kit": "./cli.mjs" },
-  "files": ["index.js", "sandbox.mjs", "policy.mjs", "defaults.mjs", "config.mjs", "cli.mjs", "kit/", "packs/", "test/opencode_integration.py", "test/probe_opencode.py", "docs/compatibility.md", "docs/deniz-setup.md", "examples/deniz-preferences.jsonc", "README.md", "LICENSE"],
+  "files": ["index.js", "sandbox.mjs", "policy.mjs", "defaults.mjs", "workflow-policy.mjs", "integrations/", "config.mjs", "cli.mjs", "kit/", "packs/", "test/opencode_integration.py", "test/probe_opencode.py", "docs/compatibility.md", "docs/deniz-setup.md", "examples/deniz-preferences.jsonc", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "test:opencode": "python3 test/opencode_integration.py"

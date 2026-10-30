@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/obra/superpowers",
+  "revision": "2ce8aa15d05bd57213e6f746f953aafb7ded7a8b",
+  "version": "7.0.1",
+  "scope": [
+    ".opencode/plugins/superpowers.js",
+    "skills/",
+    "LICENSE"
+  ],
+  "modifications": "None; gating is implemented in the parent adapter."
+}

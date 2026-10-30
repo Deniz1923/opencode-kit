@@ -157,10 +157,10 @@ class AgentIntegration(unittest.TestCase):
         injector = self.root / 'workflow-fixture'; injector.mkdir()
         (injector / 'package.json').write_text('{"type":"module"}')
         bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\nThe using-superpowers skill content is included below.\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>'
-        (injector / 'index.js').write_text('export default {id:"workflow-fixture",async setup(ctx){await ctx.session.hook("context",e=>{'
+        (injector / 'index.js').write_text('import {createSuperpowersAdapter} from ' + json.dumps(str(ROOT / 'integrations/superpowers/index.js')) + '; export default createSuperpowersAdapter({id:"workflow-fixture",async setup(ctx){await ctx.session.hook("context",e=>{'
             + 'e.system.push({type:"text",text:"OpenCode goal mode policy:\\n- Manage goals only through the goal tools."});'
             + 'const user=e.messages.find(m=>m.role==="user");if(user)user.content.unshift({type:"text",text:' + json.dumps(bootstrap) + '});'
-            + '});}};')
+            + '});}});')
         self.config(agent='chat', existing_plugins=[str(injector)])
         target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
         pack = subprocess.run(['node', '--input-type=module', '-e',
@@ -254,7 +254,7 @@ class AgentIntegration(unittest.TestCase):
         packages = json.loads(user_config.read_text()).get('plugins', [])
         # Avoid loading the previous sandbox plugin and the candidate with the
         # same plugin ID into one disposable server.
-        packages = [p for p in packages if 'opencode-sandbox' not in (p if isinstance(p, str) else p['package']) and '/opencode-kit/versions/' not in (p if isinstance(p, str) else p['package'])]
+        packages = [p for p in packages if 'opencode-sandbox' not in (p if isinstance(p, str) else p['package']) and ('/opencode-kit/versions/' not in (p if isinstance(p, str) else p['package']) or (p if isinstance(p, str) else p['package']).endswith('/integrations/superpowers'))]
         self.host.env['XDG_CACHE_HOME'] = str(Path.home() / '.cache')
         self.config(existing_plugins=packages)
         context, _ = self.finish(self.begin())

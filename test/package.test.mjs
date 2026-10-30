@@ -17,6 +17,11 @@ test('packed release installs offline and runs sandbox setup and doctor in a dis
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: home + '/.config', XDG_DATA_HOME: home + '/.local/share', OPENCODE_CONFIG_DIR: home + '/.config/opencode' };
   const bin = prefix + '/bin/opencode-kit';
   command(bin, ['init', '--sandbox', '--agents', 'deniz', '--apply'], { env });
+  const configured = JSON.parse(fs.readFileSync(home + '/.config/opencode/opencode.json'));
+  const launcher = configured.plugins.at(-1).package + '/integrations/superpowers/upstream/skills/executing-plans/scripts/task-start';
+  const launched = spawnSync(launcher, [], { encoding: 'utf8' });
+  assert.equal(launched.status, 2, launched.error?.message ?? launched.stderr);
+  assert.match(launched.stderr, /usage: task-start/);
   const out = command(bin, ['doctor'], { env }); assert.match(out, /PASS real bubblewrap execution/);
   assert.ok(!out.includes('FAIL'), out);
   command(bin, ['doctor', '--full'], { env, timeout: 60000 });

@@ -7,7 +7,7 @@ import { compose, parseConfig, patchConfig } from './compose.mjs';
 import { inside, loadPolicy } from '../policy.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CODE = ['index.js', 'sandbox.mjs', 'policy.mjs', 'defaults.mjs'];
+const CODE = ['index.js', 'sandbox.mjs', 'policy.mjs', 'defaults.mjs', 'workflow-policy.mjs'];
 const digest = text => text === null ? null : createHash('sha256').update(text).digest('hex');
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -86,10 +86,19 @@ function unapply(current, before, after, where, conflicts, resolutions) {
   return current;
 }
 function codeFiles(paths) {
-  const content = CODE.map(name => [name, fs.readFileSync(path.join(ROOT, name), 'utf8')]);
-  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.2.0', private: true })]);
+  const content = CODE.map(name => [name, fs.readFileSync(path.join(ROOT, name), 'utf8'), 0o600]);
+  function include(directory) {
+    for (const entry of fs.readdirSync(path.join(ROOT, directory), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
+      const relative = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error('Managed integration symlinks are unsupported');
+      if (entry.isDirectory()) include(relative);
+      else if (entry.isFile()) content.push([relative, fs.readFileSync(path.join(ROOT, relative), 'utf8'), fs.statSync(path.join(ROOT, relative)).mode & 0o111 ? 0o700 : 0o600]);
+    }
+  }
+  include('integrations/superpowers');
+  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.2.0', private: true }), 0o600]);
   const hash = digest(json(content)); const directory = path.join(paths.store, 'versions', hash.slice(0, 20));
-  return { directory, hash, files: content.map(([name, after]) => ({ path: path.join(directory, name), after })) };
+  return { directory, hash, files: content.map(([name, after, mode]) => ({ path: path.join(directory, name), after, mode })) };
 }
 export function planInstall(paths, requested = {}, resolutions = {}, { remove } = {}) {
   assertReady(paths); const stateText = read(paths.state, true), state = stateAt(paths);
@@ -144,12 +153,12 @@ export function planRemoval(paths, id, resolutions = {}) { return planInstall(pa
 export function listInstalled(paths) { return stateAt(paths)?.components ?? []; }
 export function installedSelection(paths) { return stateAt(paths)?.selection ?? { packs: [], sandbox: false, workflow: false }; }
 function ensureParent(file) { checkPath(file); fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 }); checkPath(file); }
-function atomic(file, text) {
+function atomic(file, text, mode = 0o600) {
   ensureParent(file);
   if (text === null) { fs.rmSync(file, { force: true }); return; }
   const temp = file + '.tmp-' + randomUUID();
   try {
-    const fd = fs.openSync(temp, 'wx', 0o600);
+    const fd = fs.openSync(temp, 'wx', mode);
     try { fs.writeFileSync(fd, text); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temp, file);
     const directory = fs.openSync(path.dirname(file), 'r'); try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
@@ -201,7 +210,7 @@ export function applyPlan(plan, { faultAfter, interruptAfter } = {}) {
     atomic(path.join(backup, 'transaction.json'), json(journal));
     atomic(journalPath(plan.paths), json(journal));
     for (const [index, file] of files.entries()) {
-      atomic(file.path, file.after);
+      atomic(file.path, file.after, file.mode);
       if (interruptAfter === index + 1) { const e = new Error('Installation interrupted (test simulation); run recover'); e.interrupted = true; throw e; }
       if (faultAfter === index + 1) throw new Error('Injected installation failure');
     }

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runSandbox, runProcess, inside } from './sandbox.mjs';
 import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths } from './policy.mjs';
+import { deniedAction, workflowPermissions } from './workflow-policy.mjs';
 const inputSchema = {
   type: 'object',
   properties: {
@@ -63,16 +64,8 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
     // capabilities or changes user content, answer style, or model settings.
     await ctx.session.hook('context', async event => {
       if (event.agent?.split('/').at(-1) !== 'chat') return;
-      const result = await ctx.agent.get({ agentID: event.agent });
-      const agent = result.data ?? result;
-      const denied = action => {
-        let effect;
-        for (const rule of agent.permissions ?? []) {
-          const pattern = rule.action.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-          if (rule.resource === '*' && new RegExp('^' + pattern + '$').test(action)) effect = rule.effect;
-        }
-        return effect === 'deny';
-      };
+      const rules = await workflowPermissions(ctx, event.agent);
+      const denied = action => deniedAction(rules, action);
       // Newer hosts may advertise a denied tool. Keep authority in permission
       // rules and independently omit unavailable workflows from model context.
       for (const name of Object.keys(event.tools ?? {})) {
@@ -81,24 +74,6 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
         if (/^opencode[_.]/.test(name) && denied('execute')) delete event.tools[name];
       }
       if (!denied('skill') || !denied('subagent')) return;
-      const firstUser = event.messages?.find(message => message.role === 'user');
-      const first = firstUser?.content?.[0];
-      if (first?.type === 'text'
-        && first.text?.startsWith('<EXTREMELY_IMPORTANT>\nYou have superpowers.\n')
-        && first.text.includes('The using-superpowers skill content is included below.')
-        && first.text.includes('**Tool Mapping for OpenCode:**')
-        && first.text.endsWith('</EXTREMELY_IMPORTANT>')) {
-        try {
-          // Bootstrap parts are transient. A real quotation exists in stored
-          // user text and must survive, including when attachments follow it.
-          const stored = await ctx.session.context({ sessionID: event.sessionID });
-          const userTexts = Array.isArray(stored) ? stored.filter(message => message.type === 'user').map(message => message.text) : null;
-          if (userTexts && userTexts.every(text => typeof text === 'string' && !text.includes(first.text))) {
-            firstUser.content.shift();
-            if (!firstUser.content.length) event.messages.splice(event.messages.indexOf(firstUser), 1);
-          }
-        } catch { /* Preserve uncertain content if transcript lookup fails. */ }
-      }
       if (!event.tools?.get_goal && !event.tools?.create_goal && Array.isArray(event.system)) {
         event.system = event.system.filter(part => !(part.type === 'text'
           && part.text?.startsWith('OpenCode goal mode policy:\n- Manage goals only through the goal tools.')));

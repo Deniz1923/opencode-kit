@@ -1,0 +1,45 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import adapter from '../integrations/superpowers/index.js';
+
+function context() {
+  const hooks = new Map(), skills = [];
+  let historyReads = 0;
+  const ctx = {
+    agent: { get: async () => ({ data: { permissions: ['skill', 'subagent'].map(action => ({ action, resource: '*', effect: 'deny' })) } }) },
+    skill: { transform: async fn => fn({ add: value => skills.push(value) }) },
+    session: {
+      hook: async (name, fn) => { hooks.set(name, fn); return { dispose() {} }; },
+      get: async () => ({ id: 'ses_fixture' }),
+      context: async () => { historyReads++; throw new Error('Stored history is forbidden'); },
+    },
+  };
+  return { ctx, hooks, skills, reads: () => historyReads };
+}
+test('upstream producer leaves Chat content and compaction checkpoints untouched without history reads', async () => {
+  const h = context(); await adapter.setup(h.ctx);
+  for (const agent of ['chat', 'friend/chat']) for (const content of ['Hello', '<EXTREMELY_IMPORTANT>\nYou have superpowers.\nA deliberate quotation']) {
+    const e = { sessionID: 'ses_fixture', agent, messages: [{role:'user',content:[{type:'text',text:content},{type:'image',image:'fixture'}]}] };
+    const original = structuredClone(e); await h.hooks.get('context')(e); assert.deepEqual(e, original);
+  }
+  const e = { sessionID:'ses_fixture',agent:'chat',messages:[{role:'assistant',content:[{type:'text',text:'Checkpoint'}]}] };
+  const original = structuredClone(e); await h.hooks.get('context')(e); assert.deepEqual(e,original);
+  assert.equal(h.reads(),0);
+  assert.ok(h.skills.some(s=>s.id==='brainstorming'));
+});
+test('Build and Plan still receive the original Superpowers bootstrap', async () => {
+  const h=context(); await adapter.setup(h.ctx);
+  for (const agent of ['build','plan']) {
+    const e={sessionID:'ses_fixture',agent,messages:[{role:'user',content:[{type:'text',text:'Original request'}]}]};
+    await h.hooks.get('context')(e);
+    assert.match(e.messages[0].content[0].text,/You have superpowers/);
+    assert.equal(e.messages[0].content.at(-1).text,'Original request');
+  }
+  assert.equal(h.reads(),0);
+});
+test('explicitly restoring Chat workflow access restores upstream behavior', async () => {
+  const h=context(); h.ctx.agent.get=async()=>({permissions:[{action:'skill',resource:'*',effect:'allow'}]});
+  await adapter.setup(h.ctx);
+  const e={sessionID:'ses_fixture',agent:'chat',messages:[{role:'user',content:[{type:'text',text:'Original request'}]}]};
+  await h.hooks.get('context')(e); assert.match(e.messages[0].content[0].text,/You have superpowers/);
+});

@@ -15,6 +15,14 @@ const source = {
     explore: { mode: 'subagent', prompt: 'EXPLORE', permission: { edit: 'deny' } } },
 };
 const opts = { home: '/home/test', pluginPath: '/home/test/addons/sandbox' };
+test('configured Superpowers uses the managed producer adapter across code upgrades', () => {
+  const once = migrateConfig(source, opts);
+  assert.ok(once.plugins.some(p => p.package === '/home/test/addons/sandbox/integrations/superpowers'));
+  assert.ok(!once.plugins.some(p => typeof p === 'string' && p.startsWith('superpowers@')));
+  const twice = migrateConfig(once, { ...opts, pluginPath: '/new/sandbox' });
+  assert.equal(twice.plugins.filter(p => typeof p === 'object' && p.package.endsWith('/integrations/superpowers')).length, 1);
+  assert.ok(twice.plugins.some(p => p.package === '/new/sandbox/integrations/superpowers'));
+});
 
 test('migration preserves unrelated settings, prompts, plugins and original input', () => {
   const before = structuredClone(source); const c = migrateConfig(source, opts);
@@ -24,7 +32,8 @@ test('migration preserves unrelated settings, prompts, plugins and original inpu
   assert.deepEqual(c.experimental, { todo: true, subagent_depth: 2 });
   assert.equal(c.agents.build.system, 'MY EXACT PROMPT');
   assert.equal(c.agents.explore.system, 'EXPLORE');
-  assert.deepEqual(c.plugins.slice(0, 2), source.plugins);
+  assert.equal(c.plugins[0], source.plugins[0]);
+  assert.deepEqual(c.plugins[1], {package:'/home/test/addons/sandbox/integrations/superpowers'});
   assert.ok(!('permission' in c)); assert.ok(!('agent' in c));
   assert.ok(!('subagent_depth' in c));
 });

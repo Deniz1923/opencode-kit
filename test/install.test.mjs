@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { policyPaths } from '../policy.mjs';
 import { parseConfig } from '../kit/compose.mjs';
 import { planInstall, applyPlan, planRemoval, listInstalled, recover } from '../kit/install.mjs';
@@ -15,6 +16,24 @@ function fixture(t) {
   return { paths, config };
 }
 const pack = { id: 'agents:alice', name: 'Alice', version: '1', agents: { 'alice/reviewer': { mode: 'subagent', system: 'Review only.' } }, access: { 'alice/reviewer': { profile: 'read-only', shell: true, escape: 'deny' } }, settings: {}, requires: {} };
+test('managed Superpowers launchers remain directly executable after installation', t => {
+  const { paths } = fixture(t); const plan = planInstall(paths, { sandbox: true }); applyPlan(plan);
+  const entry = parseConfig(plan.files.find(f => f.path === plan.configFile).after).plugins.at(-1).package;
+  const script = path.join(entry, 'integrations/superpowers/upstream/skills/executing-plans/scripts/task-start');
+  const result = spawnSync(script, [], { encoding: 'utf8' });
+  assert.equal(result.status, 2, result.error?.message ?? result.stderr);
+  assert.match(result.stderr, /usage: task-start/);
+});
+test('sandbox removal restores the original Superpowers entry', t => {
+  const { paths, config } = fixture(t);
+  const plugins = ['other-plugin', 'superpowers@git+https://github.com/obra/superpowers.git'];
+  fs.writeFileSync(config, JSON.stringify({ plugins }));
+  applyPlan(planInstall(paths, { sandbox: true }));
+  const installed = parseConfig(fs.readFileSync(config, 'utf8'));
+  assert.ok(installed.plugins.some(p => typeof p === 'object' && p.package.endsWith('/integrations/superpowers')));
+  applyPlan(planRemoval(paths, 'sandbox'));
+  assert.deepEqual(parseConfig(fs.readFileSync(config, 'utf8')).plugins, plugins);
+});
 test('agent-only install, repeated install and removal preserve unrelated JSONC settings', t => {
   const { paths, config } = fixture(t);
   applyPlan(planInstall(paths, { packs: [pack] }));

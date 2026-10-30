@@ -39,18 +39,25 @@ function host(t, { deny = false } = {}) {
 }
 
 const bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\n\n**IMPORTANT: The using-superpowers skill content is included below. It is ALREADY LOADED**\nWorkflow instructions\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>';
+test('Chat cleanup preserves messages without retrieving stored session text', async t => {
+  const h = host(t); let reads = 0;
+  h.ctx.session.context = async () => { reads++; throw new Error('History retrieval forbidden'); };
+  await h.plugin.setup(h.ctx); const event = chatContext(), messages = structuredClone(event.messages);
+  await h.hooks.get('session:context')(event);
+  assert.equal(reads, 0); assert.deepEqual(event.messages, messages);
+});
 function chatContext(agent = 'chat') {
   return { agent, system: [{ type: 'text', text: 'Keep the user’s answer style.' },
     { type: 'text', text: 'OpenCode goal mode policy:\n- Manage goals only through the goal tools.\nGeneric goal instructions.' }],
   messages: [{ role: 'user', content: [{ type: 'text', text: bootstrap }, { type: 'text', text: 'Explain this fully.' }] }],
   tools: { read: {}, edit: {}, websearch: {}, sandbox_shell: {}, shell_unsandboxed: {} }, options: { maxTokens: 8192 } };
 }
-test('lean Chat removes only unused workflow injections and keeps practical tools and answer settings', async t => {
+test('lean Chat removes the unused goal reminder and keeps messages, tools and answer settings', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
   const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
-  const event = chatContext(); const tools = structuredClone(event.tools);
+  const event = chatContext(); const tools = structuredClone(event.tools), messages = structuredClone(event.messages);
   await hook(event);
-  assert.deepEqual(event.messages[0].content, [{ type: 'text', text: 'Explain this fully.' }]);
+  assert.deepEqual(event.messages, messages);
   assert.deepEqual(event.system, [{ type: 'text', text: 'Keep the user’s answer style.' }]);
   assert.deepEqual(event.tools, tools); assert.deepEqual(event.options, { maxTokens: 8192 });
 });
@@ -83,7 +90,7 @@ test('Chat omits workflow tools even when the host advertises denied definitions
   Object.assign(event.tools, { skill: {}, subagent: {}, execute: {}, todowrite: {}, create_goal: {}, opencode_session_move: {} });
   await h.hooks.get('session:context')(event);
   assert.deepEqual(Object.keys(event.tools).sort(), ['edit','read','sandbox_shell','shell_unsandboxed','websearch']);
-  assert.equal(event.messages[0].content.length, 1);
+  assert.equal(event.messages[0].content.length, 2);
 });
 test('a user quotation with an attachment is preserved using stored user text', async t => {
   const h = host(t); h.ctx.session.context = async () => [{ type: 'user', text: bootstrap }];
@@ -92,13 +99,14 @@ test('a user quotation with an attachment is preserved using stored user text', 
   const original = structuredClone(event.messages);
   await h.hooks.get('session:context')(event); assert.deepEqual(event.messages, original);
 });
-test('bootstrap-only synthetic messages after compaction can be removed for namespaced Chat', async t => {
+test('cleanup does not remove quoted instructions beside a compaction checkpoint', async t => {
   const h = host(t); h.ctx.session.context = async () => [{ type: 'checkpoint', id: 'checkpoint' }];
   await h.plugin.setup(h.ctx); const event = chatContext('friend/chat');
   event.messages = [{ role: 'assistant', content: [{ type: 'text', text: 'Checkpoint' }] },
     { role: 'user', content: [{ type: 'text', text: bootstrap }] }];
+  const original = structuredClone(event.messages);
   await h.hooks.get('session:context')(event);
-  assert.deepEqual(event.messages, [{ role: 'assistant', content: [{ type: 'text', text: 'Checkpoint' }] }]);
+  assert.deepEqual(event.messages, original);
 });
 test('an unavailable stored transcript preserves uncertain content without breaking Chat', async t => {
   const h = host(t); h.ctx.session.context = async () => { throw new Error('Unavailable'); };
