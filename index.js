@@ -4,11 +4,12 @@ import path from 'node:path';
 import { runSandbox, runProcess, inside } from './sandbox.mjs';
 import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths } from './policy.mjs';
 import { deniedAction, workflowPermissions } from './workflow-policy.mjs';
+import { workspaceStore } from './workspaces.mjs';
 const inputSchema = {
   type: 'object',
   properties: {
     command: { type: 'string', description: 'The shell command to execute.' },
-    workdir: { type: 'string', description: 'Directory inside the trusted workspace; defaults to the session directory.' },
+    workdir: { type: 'string', description: 'Directory inside an approved workspace; defaults to the session directory.' },
     timeout: { type: 'integer', minimum: 0, description: 'Timeout in milliseconds; default 120000.' },
     reason: { type: 'string', description: 'Short reason when requesting unsandboxed execution.' },
   },
@@ -40,6 +41,20 @@ function localTitle(messages) {
 export function createPlugin({ policyFile = policyPaths().policy } = {}) { return {
   id: 'opencode-workspace-sandbox',
   async setup(ctx) {
+    const approvals = workspaceStore(path.join(path.dirname(policyFile), 'workspaces'));
+    const initialDirectory = fs.realpathSync(ctx.location.directory);
+    let initialWorkspace = initialDirectory;
+    if (ctx.location.project?.canonical) {
+      const root = fs.realpathSync(ctx.location.project.canonical);
+      if (inside(initialDirectory, root) && !inside(os.homedir(), root)) initialWorkspace = root;
+    }
+    async function approvedRoots(sessionID, session) {
+      const existing = approvals.read(sessionID);
+      if (existing) return existing;
+      const inherited = session.parentID ? approvals.read(session.parentID) : undefined;
+      if (session.parentID && !inherited) throw new Error('Parent session workspace approval is unavailable; open the parent session first.');
+      return approvals.seed(sessionID, inherited ?? [initialWorkspace]);
+    }
     // Store only a bounded candidate from the current outgoing title request.
     // No transcript reads, historical backfill, model retries, or response rewriting.
     const pendingTitles = new Map();
@@ -63,6 +78,8 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
     // Presentation only: permission rules select tools; this hook never grants
     // capabilities or changes user content, answer style, or model settings.
     await ctx.session.hook('context', async event => {
+      // This runs before the model can call a session-moving host utility.
+      if (event.sessionID) await approvedRoots(event.sessionID, await ctx.session.get({ sessionID: event.sessionID }));
       if (event.agent?.split('/').at(-1) !== 'chat') return;
       const rules = await workflowPermissions(ctx, event.agent);
       const denied = action => deniedAction(rules, action);
@@ -76,6 +93,13 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
     });
     // Authority comes from an owned user policy file, never a project's plugin options.
     await ctx.permission.hook('evaluate', async event => {
+      if (event.action === 'workspace_approve') {
+        if (event.effect !== 'deny') {
+          event.effect = 'ask';
+          event.message = 'Allow this exact directory for this session? Existing agent write restrictions still apply.';
+        }
+        return;
+      }
       if (event.effect === 'deny' || !['edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;
       try {
         const policy = loadPolicy(policyFile);
@@ -87,11 +111,12 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
           event.effect = access.escape === 'ask' ? 'ask' : 'deny';
           event.message = access.escape === 'ask' ? 'Run this exact command outside the sandbox with your full user authority?' : 'This agent cannot request a sandbox escape';
         } else if (event.action === 'edit') {
-          const scratch = scratchPath(scope.workspace, canonicalTarget(policy.scratchRoot));
+          const roots = scope.roots;
           const denied = !event.resources?.length || event.resources.some(resource => {
             const target = canonicalTarget(path.resolve(scope.directory, resource));
             const paths = policyPaths();
-            return inside(target, path.dirname(policyFile)) || inside(target, paths.store) || !canEdit(access, target, { workspace: scope.workspace, scratch });
+            return inside(target, path.dirname(policyFile)) || inside(target, paths.store) || !roots.some(workspace =>
+              canEdit(access, target, { workspace, scratch: scratchPath(workspace, canonicalTarget(policy.scratchRoot)) }));
           });
           if (denied) { event.effect = 'deny'; event.message = 'File write is outside this agent’s approved output locations'; }
         }
@@ -100,13 +125,8 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
     async function sessionScope(tool) {
       const session = await ctx.session.get({ sessionID: tool.sessionID });
       const directory = fs.realpathSync(session.location.directory);
-      let workspace = directory;
-      const canonical = ctx.location.project?.canonical;
-      if (canonical && ctx.location.directory === session.location.directory) {
-        const root = fs.realpathSync(canonical);
-        if (inside(directory, root) && !inside(os.homedir(), root)) workspace = root;
-      }
-      return { directory, workspace, agent: typeof session.agent === 'string' ? session.agent : session.agent?.id };
+      const roots = await approvedRoots(tool.sessionID, session);
+      return { directory, roots, agent: typeof session.agent === 'string' ? session.agent : session.agent?.id };
     }
     async function assertPermission(action, input, tool, cwd) {
       await ctx.permission.assert({
@@ -117,6 +137,30 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
     }
     await ctx.tool.transform(editor => {
       editor.add({
+        name: 'workspace_approve',
+        description: 'Request user approval for an exact additional workspace directory in this session. Moving the session grants no write access. Existing Plan/read-only restrictions remain in force. Approval persists for this session across restarts; no command is executed.',
+        input: { type: 'object', properties: { directory: { type: 'string', description: 'Exact additional directory, absolute or relative to the current session directory.' }, reason: { type: 'string' } }, required: ['directory'], additionalProperties: false },
+        options: { codemode: false },
+        execute: async (input, tool) => {
+          loadPolicy(policyFile);
+          const { directory } = await sessionScope(tool);
+          const requested = path.resolve(directory, input.directory);
+          const target = fs.realpathSync(requested);
+          const roots = approvals.read(tool.sessionID);
+          if (!fs.statSync(target).isDirectory() || /[\0\r\n]/.test(target) || inside(os.homedir(), target)
+            || ['/', '/tmp', '/run', '/dev', '/dev/shm', '/proc', '/sys'].includes(target)
+            || inside(path.dirname(policyFile), target) || inside(target, path.dirname(policyFile))
+            || inside(policyPaths().store, target) || inside(target, policyPaths().store)) throw new Error('Unsafe additional workspace directory');
+          if (!approvals.select(roots, target)) {
+            await ctx.permission.assert({ sessionID: tool.sessionID, agent: tool.agent, action: 'workspace_approve', resources: [target],
+              metadata: { sessionID: tool.sessionID, reason: input.reason ?? '', approvedDirectories: roots }, source: source(tool) });
+            if (fs.realpathSync(requested) !== target) throw new Error('Requested directory changed during approval');
+            approvals.approve(tool.sessionID, target);
+          }
+          return toolResult({ content: 'Approved workspace directory: ' + target, directories: approvals.read(tool.sessionID) });
+        },
+      });
+      editor.add({
         name: 'sandbox_shell',
         description: 'Execute terminal commands in the trusted workspace using bubblewrap. Workspace and private scratch are writable; host filesystem and Git metadata are read-only. No network, host runtime sockets or GPU devices. Use this tool for terminal work; the built-in shell is denied. Retry a sandbox restriction using shell_unsandboxed with a reason; the user must approve. Commands can delete workspace files. Read-only agents receive a read-only workspace.',
         input: inputSchema, options: { codemode: false },
@@ -124,10 +168,13 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
           const policy = loadPolicy(policyFile); const access = agentAccess(policy, tool.agent);
           if (!access.shell) throw new Error('Agent terminal access is denied by kit policy');
           await assertPermission('sandbox_shell', input, tool);
-          const { directory, workspace } = await sessionScope(tool);
+          const { directory } = await sessionScope(tool);
           try {
+            const cwd = fs.realpathSync(path.resolve(directory, input.workdir ?? directory));
+            const workspace = approvals.select(approvals.read(tool.sessionID), cwd);
+            if (!workspace) throw new Error('Directory is outside this session’s approved workspaces. Request workspace_approve for the exact directory before continuing.');
             return toolResult(await runSandbox({
-              workspace, cwd: input.workdir ?? directory, command: input.command,
+              workspace, cwd, command: input.command,
               timeout: input.timeout, signal: tool.signal,
               readOnly: access.profile !== 'workspace-write',
               writablePaths: access.planningRoots,

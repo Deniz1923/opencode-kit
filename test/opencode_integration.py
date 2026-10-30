@@ -32,12 +32,14 @@ class ScriptedModel(BaseHTTPRequestHandler):
         tools = [item['function']['name'] for item in body.get('tools', [])]
         messages = body.get('messages', [])
         has_result = bool(messages and messages[-1].get('role') == 'tool')
-        tool = self.server.tool
+        steps = getattr(self.server, 'steps', None)
+        tool = steps[0]['tool'] if steps else None if steps == [] else self.server.tool
         delta = {'role': 'assistant', 'content': 'TOOL_COMPLETE' if has_result else 'TOOL_UNAVAILABLE'}
         finish = 'stop'
-        if not has_result and tool in tools:
+        if (not has_result or steps) and tool in tools:
+            arguments = steps.pop(0)['arguments'] if steps else getattr(self.server, 'arguments', None) or {'command': self.server.command}
             delta = {'role': 'assistant', 'tool_calls': [{'index': 0, 'id': 'call_local_probe', 'type': 'function',
-                'function': {'name': tool, 'arguments': json.dumps(getattr(self.server, 'arguments', None) or {'command': self.server.command})}}]}
+                'function': {'name': tool, 'arguments': json.dumps(arguments)}}]}
             finish = 'tool_calls'
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
@@ -283,7 +285,7 @@ class AgentIntegration(unittest.TestCase):
         self.assertTrue(all(r.get('state', {}).get('status') == 'active' for r in external), external)
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-2000:])
 
-    def test_session_move_changes_only_the_trusted_workspace(self):
+    def test_session_move_requires_directory_approval_before_writes(self):
         self.config(); sid = self.begin(); context, _ = self.finish(sid)
         second = self.root / 'second-project'; second.mkdir()
         subprocess.run(['git', 'init', '--quiet', str(second)], check=True)
@@ -291,8 +293,56 @@ class AgentIntegration(unittest.TestCase):
         self.api(f'/api/session/{sid}/move', {'directory': str(second)})
         self.api(f'/api/session/{sid}/prompt', {'text': 'Execute the test tool in the moved session.'})
         context, _ = self.finish(sid, after_count=len(context['data']))
+        self.assertFalse((second / 'moved-marker').exists(), json.dumps(context)[-3000:])
+        self.assertIn('workspace_approve', json.dumps(context))
+        self.model.tool = 'workspace_approve'; self.model.arguments = {'directory': str(second), 'reason': 'Synthetic second workspace'}
+        count = len(context['data'])
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Request directory approval.'})
+        context, prompts = self.finish(sid, decision='reject', after_count=count)
+        self.assertTrue(prompts)
+        self.assertTrue(all(p['action'] == 'workspace_approve' for p in prompts), prompts)
+        self.model.tool = 'sandbox_shell'; self.model.arguments = {'command': 'touch rejected-marker'}
+        count = len(context['data'])
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Try the rejected directory.'})
+        context, _ = self.finish(sid, after_count=count)
+        self.assertFalse((second / 'rejected-marker').exists())
+        self.model.tool = 'workspace_approve'; self.model.arguments = {'directory': str(second)}
+        count = len(context['data'])
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Request approval again.'})
+        context, prompts = self.finish(sid, decision='once', after_count=count)
+        self.assertTrue(prompts)
+        self.assertTrue(all(p['resources'] == [str(second)] for p in prompts), prompts)
+        self.model.tool = 'sandbox_shell'; self.model.arguments = {'command': 'touch moved-marker'}
+        count = len(context['data'])
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Write in the approved directory.'})
+        context, _ = self.finish(sid, after_count=count)
         self.assertTrue((second / 'moved-marker').exists(), json.dumps(context)[-3000:])
         self.assertFalse((self.project / 'moved-marker').exists())
+
+    def test_code_mode_session_move_cannot_grant_sandbox_write_access(self):
+        self.config()
+        second = self.root / 'unapproved-project'; second.mkdir()
+        self.model.steps = [
+            {'tool': 'execute', 'arguments': {'code': 'return await tools.opencode.session_move({directory:' + json.dumps(str(second)) + '});'}},
+            {'tool': 'sandbox_shell', 'arguments': {'command': 'touch code-mode-escape'}},
+        ]
+        sid = self.begin(); context, _ = self.finish(sid)
+        self.assertEqual(self.api('/api/session/' + sid)['data']['location']['directory'], str(second))
+        self.assertFalse((second / 'code-mode-escape').exists(), json.dumps(context)[-3000:])
+        self.assertIn('approved workspaces', json.dumps(context))
+
+    def test_child_session_inherits_parent_workspace_authority(self):
+        self.config(); parent = self.begin(); self.finish(parent)
+        second = self.root / 'child-destination'; second.mkdir()
+        child = self.api('session.create', {'parentID': parent, 'location': {'directory': str(second)}})['data']['id']
+        self.assertEqual(self.api('/api/session/' + child)['data'].get('parentID'), parent)
+        # OpenCode itself keeps children at the parent location. An explicit
+        # workdir must still not give a child a new writable workspace.
+        self.model.arguments = {'command': 'touch child-outside-parent', 'workdir': str(second)}
+        self.api(f'/api/session/{child}/prompt', {'text': 'Try writing in the child session location.'})
+        context, _ = self.finish(child)
+        self.assertFalse((second / 'child-outside-parent').exists(), json.dumps(context)[-3000:])
+        self.assertIn('approved workspaces', json.dumps(context))
 
     def test_allowed_escape_is_forced_to_prompt_and_rejection_prevents_execution(self):
         marker = self.root / 'rejected'

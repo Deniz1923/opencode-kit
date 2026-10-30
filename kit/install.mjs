@@ -7,7 +7,7 @@ import { compose, parseConfig, patchConfig } from './compose.mjs';
 import { inside, loadPolicy } from '../policy.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CODE = ['index.js', 'sandbox.mjs', 'policy.mjs', 'defaults.mjs', 'workflow-policy.mjs'];
+const CODE = ['index.js', 'sandbox.mjs', 'policy.mjs', 'defaults.mjs', 'workflow-policy.mjs', 'workspaces.mjs'];
 const digest = text => text === null ? null : createHash('sha256').update(text).digest('hex');
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);

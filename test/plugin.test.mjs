@@ -211,6 +211,84 @@ test('native edit permission guard allows plans but denies source for Planner', 
   }
 });
 
+test('moving a session cannot expand native or sandbox write access without directory approval', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  await h.hooks.get('session:context')({ sessionID: 'ses_test', agent: 'build', tools: {} });
+  const second = path.join(h.root, 'second'); fs.mkdirSync(second);
+  h.ctx.session.get = async () => ({ location: { directory: second } });
+  const edit = { action: 'edit', effect: 'allow', agent: 'build', sessionID: 'ses_test', resources: ['blocked'] };
+  await h.hooks.get('evaluate')(edit); assert.equal(edit.effect, 'deny');
+  const result = await h.tools.get('sandbox_shell').execute({ command: 'touch blocked' }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(second, 'blocked')), false);
+});
+
+test('approved directories survive plugin reloads while rejected requests grant no access', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  await h.hooks.get('session:context')({ sessionID: 'ses_test', agent: 'build', tools: {} });
+  const second = path.join(h.root, 'second'); fs.mkdirSync(second);
+  h.ctx.session.get = async () => ({ location: { directory: second } });
+  const originalAssert = h.ctx.permission.assert;
+  h.ctx.permission.assert = async input => { if (input.action === 'workspace_approve') throw new Error('Rejected directory'); return originalAssert(input); };
+  await assert.rejects(h.tools.get('workspace_approve').execute({ directory: second }, h.toolCtx), /Rejected directory/);
+  let result = await h.tools.get('sandbox_shell').execute({ command: 'touch rejected' }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(second, 'rejected')), false);
+  h.ctx.permission.assert = originalAssert;
+  await h.tools.get('workspace_approve').execute({ directory: second }, h.toolCtx);
+  const request = h.requests.find(r => r.action === 'workspace_approve');
+  assert.deepEqual(request.resources, [second]); assert.equal(request.metadata.sessionID, 'ses_test');
+  // A fresh location/plugin instance must load the same approved session roots.
+  h.ctx.location = { directory: second, project: { canonical: second } };
+  await createPlugin({ policyFile: h.policyFile }).setup(h.ctx);
+  result = await h.tools.get('sandbox_shell').execute({ command: 'touch approved' }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 0, result.content); assert.ok(fs.existsSync(path.join(second, 'approved')));
+  const outside = path.join(h.root, 'unapproved'); fs.mkdirSync(outside);
+  result = await h.tools.get('sandbox_shell').execute({ command: 'touch blocked', workdir: outside }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(outside, 'blocked')), false);
+  h.ctx.session.get = async () => ({ location: { directory: h.workspace } });
+  result = await h.tools.get('sandbox_shell').execute({ command: 'touch approved-workdir', workdir: second }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 0, result.content); assert.ok(fs.existsSync(path.join(second, 'approved-workdir')));
+  result = await h.tools.get('sandbox_shell').execute({ command: 'touch original-still-approved' }, h.toolCtx);
+  assert.equal(result.metadata.exit_code, 0, result.content);
+});
+
+test('directory approval preserves explicit denial and agent write profiles', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  for (const effect of ['allow', 'ask', 'deny']) {
+    const e = { action: 'workspace_approve', effect, agent: 'build', sessionID: 'ses_test' };
+    await h.hooks.get('evaluate')(e); assert.equal(e.effect, effect === 'deny' ? 'deny' : 'ask');
+  }
+  const second = path.join(h.root, 'second'); fs.mkdirSync(second);
+  await h.hooks.get('session:context')({ sessionID: 'ses_test', agent: 'build', tools: {} });
+  h.ctx.session.get = async () => ({ location: { directory: second } });
+  await h.tools.get('workspace_approve').execute({ directory: second }, h.toolCtx);
+  const result = await h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, { ...h.toolCtx, agent: 'explore' });
+  assert.notEqual(result.metadata.exit_code, 0); assert.equal(fs.existsSync(path.join(second, 'forbidden')), false);
+  const edit = { action: 'edit', effect: 'allow', agent: 'plan', sessionID: 'ses_test', resources: ['src/main.js'] };
+  await h.hooks.get('evaluate')(edit); assert.equal(edit.effect, 'deny');
+  const planEdit = { ...edit, effect: 'allow', resources: ['docs/superpowers/plans/allowed.md'] };
+  await h.hooks.get('evaluate')(planEdit); assert.equal(planEdit.effect, 'allow');
+});
+
+test('subagents inherit approved roots instead of trusting a different session location', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  await h.hooks.get('session:context')({ sessionID: 'ses_test', agent: 'build', tools: {} });
+  const outside = path.join(h.root, 'outside'); fs.mkdirSync(outside);
+  h.ctx.session.get = async () => ({ parentID: 'ses_test', location: { directory: outside } });
+  await h.hooks.get('session:context')({ sessionID: 'ses_child', agent: 'build', tools: {} });
+  const r = await h.tools.get('sandbox_shell').execute({ command: 'touch blocked' }, { ...h.toolCtx, sessionID: 'ses_child' });
+  assert.equal(r.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(outside, 'blocked')), false);
+});
+
+test('a directory alias changed during approval grants no access', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  const second = path.join(h.root, 'second'), third = path.join(h.root, 'third'), alias = path.join(h.root, 'alias');
+  fs.mkdirSync(second); fs.mkdirSync(third); fs.symlinkSync(second, alias);
+  h.ctx.permission.assert = async () => { fs.unlinkSync(alias); fs.symlinkSync(third, alias); };
+  await assert.rejects(h.tools.get('workspace_approve').execute({ directory: alias }, h.toolCtx), /changed during approval/);
+  const r = await h.tools.get('sandbox_shell').execute({ command: 'touch blocked', workdir: second }, h.toolCtx);
+  assert.equal(r.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(second, 'blocked')), false);
+});
+
 test('missing policy stops execution instead of guessing agent privileges', async t => {
   const h = host(t); await h.plugin.setup(h.ctx); fs.unlinkSync(h.policyFile);
   await assert.rejects(h.tools.get('sandbox_shell').execute({ command: 'touch forbidden' }, h.toolCtx), /policy.*missing|setup/i);

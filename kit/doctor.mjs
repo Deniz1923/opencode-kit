@@ -5,7 +5,7 @@ import { planInstall, listInstalled } from './install.mjs';
 import { loadPolicy } from '../policy.mjs';
 import { runSandbox } from '../sandbox.mjs';
 
-export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1'], bwrap: ['0.13.1'] };
+export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3'], bwrap: ['0.13.1'] };
 export const supportedPlatform = (platform = process.platform, arch = process.arch) => platform === 'linux' && arch === 'x64';
 function version(command) {
   const r = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });

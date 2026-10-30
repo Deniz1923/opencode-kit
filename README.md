@@ -10,7 +10,7 @@ private to prevent accidental registry publication. License: MIT.
 
 ## Install
 
-Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4 or 2.2.1**, bubblewrap **0.13.1**, Git,
+Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4, 2.2.1 or 2.2.3**, bubblewrap **0.13.1**, Git,
 Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
 versions are rejected until compatibility is tested. Agent prompts are ordinary
 text; this installer and OS sandbox target Linux only.
@@ -78,6 +78,20 @@ node cli.mjs init --sandbox --profile team/builder=workspace-write \
 Review the printed profiles. Host escape always requires approval. Defaults are
 writer for Build/General/Chat, planner for Plan, reader for review/exploration.
 The test engineer may request an approved host escape.
+
+Each session records its initial workspace independently of its current location.
+Moving a session, including through Code Mode, does not authorize another writable
+directory. The agent uses `workspace_approve` to request approval for an exact
+additional directory. Rejection grants nothing; approval lasts for that session
+across restarts and retains the agent's existing profile. Plan still writes only
+its planning folders, and readers remain read-only. Subagents inherit their
+parent's approved directories. Commands can select an approved directory through
+`workdir`; each invocation is sandboxed within that selected workspace.
+
+Approval records contain only session IDs and directory paths in the private
+`~/.config/opencode-kit/workspaces/` directory (following XDG settings). They do
+not contain conversation text. Workspace approval does not authorize network
+access or unsandboxed execution.
 
 ## Chat without coding overhead
 
