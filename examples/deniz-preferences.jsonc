@@ -11,7 +11,6 @@
   // Optional executable plugins. These run host-side and are separate from the
   // data-only agent packs. The kit preserves these when you select the sandbox.
   "plugins": [
-    "@prevalentware/opencode-goal-plugin",
     "superpowers@git+https://github.com/obra/superpowers.git"
   ]
 }

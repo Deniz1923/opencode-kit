@@ -73,11 +73,6 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
         if (workflow && denied(name)) delete event.tools[name];
         if (/^opencode[_.]/.test(name) && denied('execute')) delete event.tools[name];
       }
-      if (!denied('skill') || !denied('subagent')) return;
-      if (!event.tools?.get_goal && !event.tools?.create_goal && Array.isArray(event.system)) {
-        event.system = event.system.filter(part => !(part.type === 'text'
-          && part.text?.startsWith('OpenCode goal mode policy:\n- Manage goals only through the goal tools.')));
-      }
     });
     // Authority comes from an owned user policy file, never a project's plugin options.
     await ctx.permission.hook('evaluate', async event => {

@@ -158,7 +158,6 @@ class AgentIntegration(unittest.TestCase):
         (injector / 'package.json').write_text('{"type":"module"}')
         bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\nThe using-superpowers skill content is included below.\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>'
         (injector / 'index.js').write_text('import {createSuperpowersAdapter} from ' + json.dumps(str(ROOT / 'integrations/superpowers/index.js')) + '; export default createSuperpowersAdapter({id:"workflow-fixture",async setup(ctx){await ctx.session.hook("context",e=>{'
-            + 'e.system.push({type:"text",text:"OpenCode goal mode policy:\\n- Manage goals only through the goal tools."});'
             + 'const user=e.messages.find(m=>m.role==="user");if(user)user.content.unshift({type:"text",text:' + json.dumps(bootstrap) + '});'
             + '});}});')
         self.config(agent='chat', existing_plugins=[str(injector)])
@@ -185,6 +184,24 @@ class AgentIntegration(unittest.TestCase):
         self.assertNotIn('You have superpowers.', sent)
         self.assertNotIn('OpenCode goal mode policy:', sent)
         self.assertIn('Execute the configured test tool now.', sent)
+
+    def test_native_goal_is_available_without_the_third_party_plugin(self):
+        version = subprocess.run(['opencode', '--version'], capture_output=True, text=True, check=True).stdout
+        if '2.1.' in version:
+            self.skipTest('Native goal mode was introduced in OpenCode 2.2.1')
+        self.config()
+        self.api('config.get')
+        # The inventory initially returns empty while the plugin host activates.
+        # Wait for native registration rather than asserting on that first snapshot.
+        for _ in range(100):
+            plugins = self.api('plugin.list')['data']
+            if any(p.get('id') == 'opencode.goal' and p.get('state', {}).get('status') == 'active' for p in plugins):
+                break
+            time.sleep(.05)
+        self.assertTrue(any(p.get('id') == 'opencode.goal' and p.get('state', {}).get('status') == 'active' for p in plugins))
+        self.assertFalse(any(p.get('id') == 'local.goal-mode.server' for p in plugins))
+        commands = self.api('/api/command')['data']
+        self.assertTrue(any(c.get('name') == 'goal' for c in commands))
 
     def test_external_write_is_blocked(self):
         marker = ARTIFACTS / ('outside-' + self.root.name)

@@ -52,13 +52,13 @@ function chatContext(agent = 'chat') {
   messages: [{ role: 'user', content: [{ type: 'text', text: bootstrap }, { type: 'text', text: 'Explain this fully.' }] }],
   tools: { read: {}, edit: {}, websearch: {}, sandbox_shell: {}, shell_unsandboxed: {} }, options: { maxTokens: 8192 } };
 }
-test('lean Chat removes the unused goal reminder and keeps messages, tools and answer settings', async t => {
+test('Chat tool cleanup preserves all user and system instructions', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
   const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
-  const event = chatContext(); const tools = structuredClone(event.tools), messages = structuredClone(event.messages);
+  const event = chatContext(); const tools = structuredClone(event.tools), messages = structuredClone(event.messages), system = structuredClone(event.system);
   await hook(event);
   assert.deepEqual(event.messages, messages);
-  assert.deepEqual(event.system, [{ type: 'text', text: 'Keep the user’s answer style.' }]);
+  assert.deepEqual(event.system, system);
   assert.deepEqual(event.tools, tools); assert.deepEqual(event.options, { maxTokens: 8192 });
 });
 test('workflow cleanup leaves Build and unrelated agents untouched', async t => {

@@ -91,7 +91,8 @@ When Superpowers is configured, the kit installs a managed producer adapter
 using the same upstream 7.0.1 revision recorded in its provenance file. It skips
 the upstream context-injection callback for restricted Chat agents. Build and
 Plan still use that upstream callback, and the original skills stay registered.
-Chat's generic unused goal-policy reminder is also omitted from model requests.
+Goal mode uses OpenCode's built-in `/goal` on 2.2.1 and later; the optional
+preferences no longer install a separate goal plugin or its generic reminders.
 The adapter does not retrieve stored messages or remove quoted user text.
 This is context trimming, not a shorter-answer prompt or a reasoning limit.
 The plugin recognizes `chat` and namespaced roles ending in `/chat`. It skips injection

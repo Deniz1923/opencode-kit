@@ -13,8 +13,9 @@ as described in the README; its answer style, model and practical tools are kept
   Debugger and Test Engineer prompts, descriptions and access declarations.
 - Optional workflow preferences enable todos and control delegation depth.
 - `examples/deniz-preferences.jsonc` records manual sharing, todo enabled,
-  delegation depth 2, and the two optional executable plugins used locally:
-  `@prevalentware/opencode-goal-plugin` and Superpowers.
+  delegation depth 2, and optional Superpowers integration.
+- Goal mode uses OpenCode's built-in `/goal` on 2.2.1 and later. The redundant
+  third-party goal plugin is not part of Deniz's setup.
 
 No model or provider credential is pinned/exported. Select and authenticate your
 own provider/model in OpenCode. The sandbox does not require the optional plugins.
