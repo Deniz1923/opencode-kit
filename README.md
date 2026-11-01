@@ -10,7 +10,7 @@ private to prevent accidental registry publication. License: MIT.
 
 ## Install
 
-Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4, 2.2.1 or 2.2.3**, bubblewrap **0.13.1**, Git,
+Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4, 2.2.1, 2.2.3 or 2.2.4**, bubblewrap **0.13.1**, Git,
 Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
 versions are rejected until compatibility is tested. Agent prompts are ordinary
 text; this installer and OS sandbox target Linux only.
@@ -98,13 +98,14 @@ access or unsandboxed execution.
 The Deniz Chat agent keeps its original conversational prompt and model choice.
 It can use web search, read/search/edit files, and run sandboxed commands when
 requested. It does not load skills, delegate to subagents, manage autonomous
-goals/todos, or use Code Mode's host utilities. Build and Plan keep their tools
-and workflows. Host escapes retain their existing approval rules.
+goals/todos, or use Code Mode's host utilities. Build and Plan keep their tools.
+Host escapes retain their existing approval rules.
 
 When Superpowers is configured, the kit installs a managed producer adapter
 using the same upstream 7.0.1 revision recorded in its provenance file. It skips
-the upstream context-injection callback for restricted Chat agents. Build and
-Plan still use that upstream callback, and the original skills stay registered.
+the upstream context-injection callback for restricted Chat agents. Plan keeps
+that callback; Deniz's Build uses the proportional workflow described below.
+The original skills stay registered.
 Goal mode uses OpenCode's built-in `/goal` on 2.2.1 and later; the optional
 preferences no longer install a separate goal plugin or its generic reminders.
 The adapter does not retrieve stored messages or remove quoted user text.
@@ -114,6 +115,28 @@ only when both skill and subagent permissions are denied. Denied workflow tools
 are explicitly omitted even on hosts that advertise them. Restoring either tool
 also restores the workflow context. An agents-only installation disables
 those tools but cannot prevent another plugin's injected context.
+
+## Build workflow
+
+Deniz's Build handles clear small changes through inspection, implementation,
+and verification. Moderate changes get a short plan; ambiguous, architectural,
+or high-risk work gets formal design/planning and appropriate independent review.
+It escalates when investigation reveals wider risks. Explicitly requested skill
+workflows and required repository instructions still apply.
+
+Repeating a read, plan, test, review, or delegation needs changed evidence, a
+failure, or a specific unresolved question. Required checks must still run, and
+results invalidated by a change must be checked again. Review findings receive
+fixes and relevant verification without automatically restarting the whole
+process. Independent work gets focused subagent briefs; tightly coupled changes
+are implemented directly by default.
+
+The prompt's standalone line `Use a workflow proportional to the task.` opts
+Build out of Superpowers' automatic startup dispatcher while keeping all skills
+available. Other authors' Build prompts retain their current behavior unless
+they adopt that line. These are behavioral instructions, not a guarantee against
+model loops or provider timeouts; there are no new hard limits on reasoning,
+reviews, tests, or answer length. Sandbox permissions and approvals are unchanged.
 
 For an existing Chat agent, append these permission rules; keep its system prompt:
 

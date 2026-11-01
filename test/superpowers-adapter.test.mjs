@@ -37,6 +37,48 @@ test('Build and Plan still receive the original Superpowers bootstrap', async ()
   }
   assert.equal(h.reads(),0);
 });
+
+test('Build opting into proportional workflow keeps skills without the automatic dispatcher', async () => {
+  const h = context();
+  h.ctx.agent.get = async () => ({ data: { system: 'Use a workflow proportional to the task.', permissions: [] } });
+  await adapter.setup(h.ctx);
+  for (const agent of ['build', 'team/build']) {
+    for (const messages of [
+      [{ role: 'user', content: [{ type: 'text', text: 'Fix the typo.' }, { type: 'image', image: 'fixture' }] }],
+      [{ role: 'assistant', content: [{ type: 'text', text: 'Opaque checkpoint' }] }],
+    ]) {
+      const event = { sessionID: 'ses_fixture', agent, messages };
+      const original = structuredClone(event);
+      await h.hooks.get('context')(event);
+      assert.deepEqual(event, original);
+    }
+  }
+  assert.ok(h.skills.some(s => s.id === 'using-superpowers'));
+  assert.ok(h.skills.some(s => s.id === 'brainstorming'));
+  assert.ok(h.skills.some(s => s.id === 'writing-plans'));
+  assert.ok(h.skills.some(s => s.id === 'systematic-debugging'));
+  assert.equal(h.reads(), 0);
+});
+
+test('the Build workflow opt-in does not suppress Plan or another role', async () => {
+  const h = context();
+  h.ctx.agent.get = async () => ({ system: 'Use a workflow proportional to the task.', permissions: [] });
+  await adapter.setup(h.ctx);
+  for (const agent of ['plan', 'team/architect']) {
+    const event = { sessionID: 'ses_fixture', agent, messages: [{ role: 'user', content: [{ type: 'text', text: 'Design this change.' }] }] };
+    await h.hooks.get('context')(event);
+    assert.match(event.messages[0].content[0].text, /You have superpowers/);
+  }
+});
+
+test('unavailable Build metadata preserves the original callback instead of breaking a turn', async () => {
+  for (const lookup of [async () => { throw new Error('Agent lookup unavailable'); }, async () => undefined]) {
+    const h = context(); h.ctx.agent.get = lookup; await adapter.setup(h.ctx);
+    const event = { sessionID: 'ses_fixture', agent: 'build', messages: [{ role: 'user', content: [{ type: 'text', text: 'Original request' }] }] };
+    await assert.doesNotReject(h.hooks.get('context')(event));
+    assert.match(event.messages[0].content[0].text, /You have superpowers/);
+  }
+});
 test('explicitly restoring Chat workflow access restores upstream behavior', async () => {
   const h=context(); h.ctx.agent.get=async()=>({permissions:[{action:'skill',resource:'*',effect:'allow'}]});
   await adapter.setup(h.ctx);

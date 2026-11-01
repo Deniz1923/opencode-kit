@@ -205,6 +205,31 @@ class AgentIntegration(unittest.TestCase):
         commands = self.api('/api/command')['data']
         self.assertTrue(any(c.get('name') == 'goal' for c in commands))
 
+    def test_proportional_build_receives_its_policy_and_can_explicitly_load_skills(self):
+        self.config(existing_plugins=[str(ROOT / 'integrations/superpowers')])
+        pack = subprocess.run(['node', '--input-type=module', '-e',
+            'import {readAgentPack} from "./kit/packs.mjs"; console.log(JSON.stringify(readAgentPack("./packs/deniz-agents").agents["deniz/build"]));'],
+            cwd=ROOT, capture_output=True, text=True, check=True)
+        build = json.loads(pack.stdout)
+        target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
+        config['agents']['build']['system'] = build['system']
+        config.setdefault('experimental', {})['todo'] = True
+        target.write_text(json.dumps(config))
+        self.model.tool = 'skill'; self.model.arguments = {'id': 'writing-plans'}
+        context, _ = self.finish(self.begin())
+        self.assertIn('# Writing Plans', json.dumps(context))
+        requests = [r for r in self.model.requests if r.get('tools') and any(
+            m.get('role') == 'user' and 'Execute the configured test tool now.' in str(m.get('content'))
+            for m in r.get('messages', []))]
+        first = requests[0]
+        texts = [m['content'] if isinstance(m.get('content'), str) else '\n'.join(
+            p.get('text', '') for p in m.get('content', []) if p.get('type') == 'text') for m in first['messages']]
+        sent = '\n'.join(texts)
+        self.assertIn(build['system'], sent)
+        self.assertNotIn('You have superpowers.', sent)
+        names = {t['function']['name'] for t in first['tools']}
+        self.assertTrue({'skill', 'subagent', 'todowrite', 'sandbox_shell', 'workspace_approve'} <= names, names)
+
     def test_external_write_is_blocked(self):
         marker = ARTIFACTS / ('outside-' + self.root.name)
         self.addCleanup(marker.unlink, missing_ok=True)
