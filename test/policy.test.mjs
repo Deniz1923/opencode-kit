@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { validatePolicy, loadPolicy, agentAccess, canEdit, policyPaths } from '../policy.mjs';
+import { validatePolicy, loadPolicy, agentAccess, canEdit, policyPaths, canonicalTarget } from '../policy.mjs';
 
 const policy = { schemaVersion: 1, scratchRoot: '/tmp/opencode/sandbox', agents: {
   build: { profile: 'workspace-write', shell: true, escape: 'ask' },
@@ -53,4 +53,16 @@ test('trusted policy must be a private owned regular file and must exist', t => 
 test('paths adapt to the invoking user and XDG settings', () => {
   assert.equal(policyPaths('/home/friend', {}).policy, '/home/friend/.config/opencode-kit/policy.json');
   assert.equal(policyPaths('/home/friend', { XDG_CONFIG_HOME: '/settings' }).policy, '/settings/opencode-kit/policy.json');
+});
+
+test('missing targets behind symlinks resolve to their actual destination', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-canonical-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'project'));
+  fs.symlinkSync('../outside/missing', path.join(root, 'project/alias'));
+  assert.equal(canonicalTarget(path.join(root, 'project/alias')), path.join(root, 'outside/missing'));
+  assert.equal(canonicalTarget(path.join(root, 'project/alias/child')), path.join(root, 'outside/missing/child'));
+  fs.symlinkSync('loop', path.join(root, 'loop'));
+  assert.throws(() => canonicalTarget(path.join(root, 'loop')), /symlink|loop/i);
+  assert.equal(canonicalTarget(path.join(root, 'project/new/file')), path.join(root, 'project/new/file'));
 });

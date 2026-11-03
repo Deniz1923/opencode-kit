@@ -39,7 +39,22 @@ export function policyPaths(home = os.homedir(), env = process.env) {
   const dataRoot = env.XDG_DATA_HOME || path.join(home, '.local/share');
   return { home, configDir: env.OPENCODE_CONFIG_DIR || path.join(configRoot, 'opencode'),
     kitConfig: path.join(configRoot, 'opencode-kit'), policy: path.join(configRoot, 'opencode-kit/policy.json'),
-    store: path.join(dataRoot, 'opencode-kit'), state: path.join(dataRoot, 'opencode-kit/state.json') };
+    store: path.join(dataRoot, 'opencode-kit'), state: path.join(dataRoot, 'opencode-kit/state.json'),
+    dataDir: path.join(dataRoot, 'opencode'), stateDir: path.join(env.XDG_STATE_HOME || path.join(home, '.local/state'), 'opencode'),
+    cacheDir: path.join(env.XDG_CACHE_HOME || path.join(home, '.cache'), 'opencode') };
+}
+// One path inventory for native file guards, shell mounts, and installation rules.
+// Do not inspect these files to discover whether they contain private data.
+export function privatePaths(home = os.homedir(), env = process.env) {
+  const p = policyPaths(home, env);
+  const configRoot = env.XDG_CONFIG_HOME || path.join(home, '.config');
+  return [...new Set([
+    ...['.ssh', '.aws', '.gnupg', '.config/gh', '.docker', '.kube', '.azure', '.config/gcloud',
+      '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.codex', '.claude', '.claude.json',
+      '.config/opencode', '.local/share/opencode', '.local/state/opencode'].map(n => path.join(home, n)),
+    path.join(configRoot, 'gh'), path.join(configRoot, 'gcloud'),
+    p.configDir, p.dataDir, p.stateDir, p.kitConfig, p.state,
+  ])];
 }
 export function loadPolicy(file) {
   let fd;
@@ -55,13 +70,23 @@ export function scratchPath(workspace, root) {
   return path.join(root, createHash('sha256').update(workspace).digest('hex').slice(0, 16));
 }
 export function canonicalTarget(file) {
-  let current = path.resolve(file); const tail = [];
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) throw new Error('Cannot resolve edit target');
-    tail.unshift(path.basename(current)); current = parent;
+  let pending = path.resolve(file).split(path.sep).filter(Boolean), current = '/', links = 0;
+  while (pending.length) {
+    const part = pending.shift();
+    if (part === '.') continue;
+    if (part === '..') { current = path.dirname(current); continue; }
+    const next = path.join(current, part);
+    let st;
+    try { st = fs.lstatSync(next); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; current = next; continue; }
+    if (st.isSymbolicLink()) {
+      if (++links > 40) throw new Error('Too many symlinks resolving file target');
+      const target = fs.readlinkSync(next);
+      if (path.isAbsolute(target)) current = '/';
+      pending = [...target.split(path.sep).filter(Boolean), ...pending];
+    } else current = next;
   }
-  return path.join(fs.realpathSync(current), ...tail);
+  return current;
 }
 export function canEdit(access, target, { workspace, scratch }) {
   if (inside(target, scratch)) return true;

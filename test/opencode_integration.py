@@ -424,6 +424,62 @@ class AgentIntegration(unittest.TestCase):
         self.assertEqual((self.project / 'docs/superpowers/plans/native.md').read_text(), 'Native plan', json.dumps(context)[-4000:])
         self.assertFalse(prompts)
 
+    def test_dangling_symlink_write_cannot_create_outside_file(self):
+        outside = self.root / 'outside-new.txt'
+        (self.project / 'alias').symlink_to(outside)
+        self.config(); self.model.tool = 'write'
+        self.model.arguments = {'path': str(self.project / 'alias'), 'content': 'SYNTHETIC-SYMLINK'}
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse(outside.exists(), json.dumps(context)[-2000:])
+
+    def test_planner_dangling_symlink_cannot_write_application_source(self):
+        plans = self.project / 'docs/superpowers/plans'; plans.mkdir(parents=True)
+        target = self.project / 'source-new.txt'; (plans / 'alias').symlink_to(target)
+        self.config(agent='plan'); self.model.tool = 'write'
+        self.model.arguments = {'path': str(plans / 'alias'), 'content': 'SYNTHETIC-SYMLINK'}
+        context, _ = self.finish(self.begin(), decision='once')
+        self.assertFalse(target.exists(), json.dumps(context)[-2000:])
+
+    def test_absolute_read_denial_applies_when_path_is_internal(self):
+        target = self.project / 'private-fixture.txt'; target.write_text('SYNTHETIC-PRIVATE-SENTINEL')
+        self.config(source_permissions=[{'action':'read', 'resource':str(target), 'effect':'deny'}])
+        self.model.tool = 'read'; self.model.arguments = {'path':str(target)}
+        context, prompts = self.finish(self.begin(), decision='reject')
+        outputs = [p.get('state') for m in context['data'] for p in m.get('content',[]) if p.get('type')=='tool']
+        self.assertNotIn('SYNTHETIC-PRIVATE-SENTINEL', json.dumps(outputs)); self.assertFalse(prompts)
+
+    def test_native_search_cannot_read_history_via_alias_or_broad_parent(self):
+        private = self.root / 'data/opencode/fake-history'; private.mkdir(parents=True)
+        (private / 'sentinel').write_text('SYNTHETIC-PRIVATE-SENTINEL')
+        (self.project / 'alias').symlink_to(private, target_is_directory=True)
+        self.config(); self.model.tool = 'grep'
+        for target in [self.project / 'alias', self.root, self.project]:
+            self.model.arguments = {'path':str(target),'pattern':'SYNTHETIC-PRIVATE'}
+            context, _ = self.finish(self.begin(), decision='once')
+            outputs=[p.get('state') for m in context['data'] for p in m.get('content',[]) if p.get('type')=='tool']
+            self.assertNotIn('SYNTHETIC-PRIVATE-SENTINEL', json.dumps(outputs))
+
+    def test_project_mcp_is_blocked_even_when_sandbox_plugin_is_absent(self):
+        self.config(plugin=False)
+        marker = self.root / 'mcp-started'
+        (self.project / 'opencode.json').write_text(json.dumps({'mcp': {'servers': {'unapproved': {
+            'type':'local', 'command':['/usr/bin/touch', str(marker)]}}},
+            'policies':[{'action':'integration.use','resource':'mcp:unapproved','effect':'allow'}]}))
+        self.api('config.get'); self.api('session.create', {'location':{'directory':str(self.project)}})
+        servers = self.api('/api/mcp')
+        time.sleep(.2)
+        self.assertFalse(marker.exists(), str(servers))
+
+    def test_approved_workspace_write_does_not_repeat_external_directory_prompt(self):
+        self.config(); second = self.root / 'extra'; second.mkdir()
+        self.model.tool='workspace_approve'; self.model.arguments={'directory':str(second)}
+        sid=self.begin(); context, prompts=self.finish(sid, decision='once')
+        self.assertTrue(any(p['action']=='workspace_approve' for p in prompts))
+        count=len(context['data']); self.model.tool='write'; self.model.arguments={'path':str(second/'ok'),'content':'ok'}
+        self.api(f'/api/session/{sid}/prompt', {'text':'Write the approved fixture.'})
+        context,prompts=self.finish(sid,decision='reject',after_count=count)
+        self.assertEqual((second/'ok').read_text(),'ok',json.dumps(context)[-2000:]); self.assertFalse(prompts)
+
     def test_todo_dependency_exposes_the_actual_tool(self):
         self.config()
         target = self.host.config / 'opencode.json'; c = json.loads(target.read_text())

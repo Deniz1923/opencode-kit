@@ -4,7 +4,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { planningRoot } from './policy.mjs';
+import { planningRoot, privatePaths, policyPaths } from './policy.mjs';
 
 export const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SPECIAL_ROOTS = new Set(['/', '/tmp', '/run', '/dev/shm', '/dev', '/proc', '/sys']);
@@ -85,13 +85,17 @@ export function runProcess(file, args, { cwd, env = process.env, timeout = 12000
 function socketFilterFD(scratchRoot) {
   // Classic seccomp BPF for the native x86-64 ABI, checked before syscall numbers.
   // Reject alternate ABIs, ptrace, io_uring (which could create sockets without
-  // socket(2)), and socket(AF_UNIX). socketpair remains available for private IPC.
+  // socket(2)), and socket(AF_UNIX). Only private stream socketpairs remain;
+  // datagram/seqpacket endpoints can address unrelated filesystem sockets.
   if (process.platform !== 'linux' || process.arch !== 'x64') throw unavailable('only Linux x86-64 is supported');
   const deny = 0x00050001; // SECCOMP_RET_ERRNO | EPERM
   const rows = [[0x20, 0, 0, 4], [0x15, 1, 0, 0xc000003e], [0x06, 0, 0, 0x80000000],
     [0x20, 0, 0, 0], [0x45, 0, 1, 0x40000000], [0x06, 0, 0, deny]];
   for (const nr of [101, 425, 426, 427]) rows.push([0x15, 0, 1, nr], [0x06, 0, 0, deny]);
-  rows.push([0x15, 0, 3, 41], [0x20, 0, 0, 16], [0x15, 0, 1, 1], [0x06, 0, 0, deny], [0x06, 0, 0, 0x7fff0000]);
+  rows.push([0x15, 0, 3, 41], [0x20, 0, 0, 16], [0x15, 0, 1, 1], [0x06, 0, 0, deny]);
+  // Reload nr after inspecting socket's domain. Mask SOCK_CLOEXEC/NONBLOCK.
+  rows.push([0x20, 0, 0, 0], [0x15, 0, 4, 53], [0x20, 0, 0, 24], [0x54, 0, 0, 0xf],
+    [0x15, 1, 0, 1], [0x06, 0, 0, deny], [0x06, 0, 0, 0x7fff0000]);
   const bytes = Buffer.alloc(rows.length * 8);
   rows.forEach(([code, jt, jf, k], i) => { bytes.writeUInt16LE(code, i * 8); bytes[i * 8 + 2] = jt; bytes[i * 8 + 3] = jf; bytes.writeUInt32LE(k, i * 8 + 4); });
   const dir = fs.mkdtempSync(path.join(scratchRoot, '.policy-'));
@@ -119,6 +123,11 @@ function gitMounts(directory, mounts) {
 }
 function gitTreeMounts(directory, mounts) {
   gitMounts(directory, mounts);
+  for (const name of RESERVED.keys()) {
+    const file = path.join(directory, name);
+    try { if (fs.lstatSync(file).isSymbolicLink()) throw unavailable('symlinked reserved configuration path: '+file); mounts.add(file); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     if (entry.isDirectory() && !['.git', '.opencode', '.agents', '.claude'].includes(entry.name)) gitTreeMounts(path.join(directory, entry.name), mounts);
   }
@@ -162,8 +171,17 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
   const narrowFDs = [];
   try {
     if (writable) {
-      for (const [name, kind] of RESERVED) {
-        const file = path.join(workspace, name);
+      const directories = new Set([workspace, cwd]);
+      // Protect missing siblings beside existing nested configuration too.
+      const visit = dir => {
+        const entries = fs.readdirSync(dir, {withFileTypes:true});
+        if (entries.some(e=>RESERVED.has(e.name))) directories.add(dir);
+        for (const e of entries) if (e.isDirectory() && !RESERVED.has(e.name)) visit(path.join(dir,e.name));
+      };
+      visit(workspace);
+      for (const directory of directories) for (const [name, kind] of RESERVED) {
+        if (name === '.git' && directory !== workspace) continue;
+        const file = path.join(directory, name);
         try {
           if (kind === 'dir') fs.mkdirSync(file, { mode: 0o555 });
           else fs.writeFileSync(file, '{}\n', { flag: 'wx', mode: 0o444 });
@@ -183,16 +201,14 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
       for (const name of RESERVED.keys()) protectedPaths.add(path.join(workspace, name));
       // Existing nested repositories must not expose writable Git metadata.
       gitTreeMounts(workspace, protectedPaths);
+      for (const p of placeholders) protectedPaths.add(p.file);
     }
-    for (const value of [INSTALL_DIR, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {
+    for (const value of [INSTALL_DIR, policyPaths(home,env).cacheDir, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {
       if (fs.existsSync(value)) protectedPaths.add(value);
     }
     for (const value of extraProtected) if (fs.existsSync(value)) protectedPaths.add(fs.realpathSync(value));
     for (const value of protectedPaths) args.push('--ro-bind', value, value);
-    const secrets = ['.ssh', '.aws', '.gnupg', '.config/gh', '.docker', '.kube', '.azure', '.config/gcloud',
-      '.git-credentials', '.netrc', '.npmrc', '.pypirc', '.config/opencode/service.json',
-      '.local/share/opencode', '.local/state/opencode', '.codex/auth.json', '.claude/.credentials.json', '.claude.json'];
-    for (const value of [...secrets.map(n => path.join(home, n)), ...maskedPaths]) {
+    for (const value of [...new Set([...privatePaths(home,env), ...maskedPaths])].sort((a,b)=>a.length-b.length)) {
       if (!path.isAbsolute(value)) throw unavailable('mask path must be absolute');
       if (!fs.existsSync(value)) continue;
       const real = fs.realpathSync(value);
@@ -240,7 +256,7 @@ export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0=
 exec /bin/bash --noprofile --norc -c "$1"
 `;
     childEnv.OPENCODE_GIT_EXCLUDES = path.join(scratch, 'run/git-excludes');
-    childEnv.OPENCODE_PLACEHOLDER_IGNORE = placeholders.map(p => '/' + path.basename(p.file)).join('\n');
+    childEnv.OPENCODE_PLACEHOLDER_IGNORE = placeholders.map(p => '/' + path.relative(workspace, p.file).split(path.sep).join('/')).join('\n');
     filterFD = socketFilterFD(scratchRoot);
     args.push('--seccomp', '3', '--chdir', cwd, '--', '/bin/bash', '--noprofile', '--norc', '-c', bootstrap, 'opencode-sandbox', command);
     const result = await runProcess(bwrap, args, { cwd: '/', env: childEnv, timeout, signal, extraFD: filterFD, extraFDs: narrowFDs });

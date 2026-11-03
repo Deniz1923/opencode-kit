@@ -92,3 +92,23 @@ test('installer state and backups have native-read hard denials', () => {
     assert.ok(c.policies.some(r => r.action === 'tool.use' && r.resource === 'read:' + resource && r.effect === 'deny'));
   }
 });
+
+test('migration preserves global denials including wildcard and scoped rules', () => {
+  const denies = [
+    {action: 'webfetch', resource: '*', effect: 'deny'},
+    {action: 'shell_unsandboxed', resource: '*', effect: 'deny'},
+    {action: 'sandbox_shell', resource: 'curl *', effect: 'deny'},
+    {action: 'external_directory', resource: '/private/*', effect: 'deny'},
+    {action: '*', resource: '*', effect: 'deny'},
+  ];
+  const c = migrateConfig({permissions: denies}, opts);
+  for (const rule of denies) assert.ok(c.permissions.some(r => JSON.stringify(r) === JSON.stringify(rule)));
+  const last = c.permissions.at(-1);
+  assert.deepEqual(last, denies.at(-1));
+  assert.deepEqual(migrateConfig(c, opts), c);
+});
+
+test('project configuration cannot introduce host MCP processes', () => {
+  const c=migrateConfig({},opts);
+  assert.ok(c.policies.some(r=>r.action==='integration.use' && r.resource==='mcp:*' && r.effect==='deny'));
+});

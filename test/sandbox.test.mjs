@@ -60,6 +60,36 @@ test('credentials and secret environment values are unavailable', async t => {
   assert.ok(!r.content.includes('NODE_OPTIONS='));
 });
 
+test('history and XDG credential locations are masked, including aliases', async t => {
+  const o = fixture(t), data = path.join(o.home, 'custom-data'), config = path.join(o.home, 'custom-config');
+  const files = [path.join(o.home, '.codex/sessions/fake'), path.join(o.home, '.claude/projects/fake'),
+    path.join(data, 'opencode/history/fake'), path.join(config, 'opencode/service.json'),
+    path.join(config, 'gh/hosts.yml'), path.join(config, 'gcloud/fake-credentials')];
+  for (const file of files) { fs.mkdirSync(path.dirname(file), {recursive:true}); fs.writeFileSync(file, 'SYNTHETIC-PRIVATE-SENTINEL'); }
+  fs.symlinkSync(path.join(o.home, '.codex'), path.join(o.workspace, 'alias'));
+  const r = await runSandbox({...o, env:{...process.env, XDG_DATA_HOME:data, XDG_CONFIG_HOME:config},
+    command: 'cat ' + [...files, path.join(o.workspace, 'alias/sessions/fake')].map(q).join(' ') + ' 2>/dev/null || true'});
+  assert.equal(r.exit_code, 0, r.content);
+  assert.ok(!r.content.includes('SYNTHETIC-PRIVATE-SENTINEL'), r.content);
+});
+
+test('existing nested configuration is read-only and absent nested configuration cannot be created', async t => {
+  const o = fixture(t); fs.mkdirSync(path.join(o.workspace, 'sub/.opencode'), {recursive:true});
+  fs.writeFileSync(path.join(o.workspace, 'sub/opencode.json'), '{}');
+  const r = await runSandbox({...o, command: '! touch sub/opencode.json; ! touch sub/opencode.jsonc; ! touch sub/.opencode/plugin.js; printf ok > sub/source.txt'});
+  assert.equal(r.exit_code, 0, r.content);
+  assert.equal(fs.readFileSync(path.join(o.workspace, 'sub/opencode.json'), 'utf8'), '{}');
+  assert.ok(!fs.existsSync(path.join(o.workspace, 'sub/opencode.jsonc')));
+  assert.ok(!fs.existsSync(path.join(o.workspace, 'sub/.opencode/plugin.js')));
+});
+
+test('non-stream Unix socketpair creation is denied while private stream IPC works', async t => {
+  const o = fixture(t);
+  const script = `import socket\na,b=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)\na.send(b'ok'); assert b.recv(2)==b'ok'\nfor kind in [socket.SOCK_DGRAM,socket.SOCK_SEQPACKET]:\n try: socket.socketpair(socket.AF_UNIX,kind)\n except OSError: continue\n raise SystemExit('non-stream socketpair permitted')`;
+  const r = await runSandbox({...o, command:'python3 -c '+q(script)});
+  assert.equal(r.exit_code, 0, r.content);
+});
+
 test('host Unix sockets and localhost network are unreachable', async t => {
   const o = fixture(t);
   const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-host-socket-'));

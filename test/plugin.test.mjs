@@ -218,6 +218,7 @@ test('moving a session cannot expand native or sandbox write access without dire
   h.ctx.session.get = async () => ({ location: { directory: second } });
   const edit = { action: 'edit', effect: 'allow', agent: 'build', sessionID: 'ses_test', resources: ['blocked'] };
   await h.hooks.get('evaluate')(edit); assert.equal(edit.effect, 'deny');
+  assert.match(edit.message, /workspace_approve/);
   const result = await h.tools.get('sandbox_shell').execute({ command: 'touch blocked' }, h.toolCtx);
   assert.equal(result.metadata.exit_code, 125); assert.equal(fs.existsSync(path.join(second, 'blocked')), false);
 });
@@ -303,4 +304,42 @@ test('copied installer config in state and backups is unreadable to sandboxed sh
   await h.plugin.setup(h.ctx);
   const r = await h.tools.get('sandbox_shell').execute({ command: `cat '${state}' '${backup}'` }, h.toolCtx);
   assert.ok(!r.content.includes('fake-provider-secret'), r.content);
+});
+
+test('native reads and searches cannot expose protected data through relative paths or aliases', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  fs.writeFileSync(path.join(h.root, 'config/fake-history'), 'SYNTHETIC-PRIVATE');
+  fs.symlinkSync(path.join(h.root, 'config'), path.join(h.workspace, 'alias'));
+  for (const [action, resources, metadata] of [
+    ['read', ['alias/fake-history'], {}],
+    ['grep', ['SYNTHETIC'], {path:'alias'}],
+    ['grep', ['SYNTHETIC'], {path:h.root}],
+  ]) {
+    const e = {action, resources, metadata, effect:'allow', agent:'build', sessionID:'ses_test'};
+    await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'deny', action);
+  }
+  const e = {action:'grep', resources:['source'], metadata:{path:h.workspace}, effect:'allow', agent:'build', sessionID:'ses_test'};
+  await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'allow');
+});
+
+test('session-approved directory boundaries stop asking without overriding denials', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  const second = path.join(h.root, 'second'); fs.mkdirSync(second);
+  await h.tools.get('workspace_approve').execute({directory:second}, h.toolCtx);
+  for (const initial of ['ask', 'deny']) {
+    const e = {action:'external_directory', resources:[second+'/*'], effect:initial, agent:'build', sessionID:'ses_test'};
+    await h.hooks.get('evaluate')(e); assert.equal(e.effect, initial === 'deny' ? 'deny' : 'allow');
+  }
+  const e = {action:'external_directory', resources:[h.root+'/*'], effect:'ask', agent:'build', sessionID:'ses_test'};
+  await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'ask');
+});
+
+test('ordinary shell has no approval reason field and restriction failures explain the approval route', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  assert.equal(h.tools.get('sandbox_shell').input.properties.reason, undefined);
+  const r = await h.tools.get('sandbox_shell').execute({command:'curl -I --max-time 2 https://example.com'}, h.toolCtx);
+  assert.notEqual(r.metadata.exit_code, 0); assert.match(r.content, /shell_unsandboxed/);
+  assert.ok(!h.requests.some(r=>r.action==='shell_unsandboxed'));
+  const normal = await h.tools.get('sandbox_shell').execute({command:'printf "test assertion failed"; exit 1'}, h.toolCtx);
+  assert.doesNotMatch(normal.content, /shell_unsandboxed/);
 });

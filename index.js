@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runSandbox, runProcess, inside } from './sandbox.mjs';
-import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths } from './policy.mjs';
+import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths, privatePaths } from './policy.mjs';
 import { deniedAction, workflowPermissions } from './workflow-policy.mjs';
 import { workspaceStore } from './workspaces.mjs';
 const inputSchema = {
@@ -11,10 +11,18 @@ const inputSchema = {
     command: { type: 'string', description: 'The shell command to execute.' },
     workdir: { type: 'string', description: 'Directory inside an approved workspace; defaults to the session directory.' },
     timeout: { type: 'integer', minimum: 0, description: 'Timeout in milliseconds; default 120000.' },
-    reason: { type: 'string', description: 'Short reason when requesting unsandboxed execution.' },
   },
   required: ['command'], additionalProperties: false,
 };
+const escapeSchema = { ...inputSchema, properties: { ...inputSchema.properties,
+  reason: {type:'string', description:'Explain the required host access so the user can decide whether to approve.'} } };
+function restrictionHint(result, access) {
+  if (result.exit_code === 0 || !/(?:could not resolve host|network is unreachable|network is down|connection refused|read-only file system|operation not permitted|permission denied|sandbox unavailable)/i.test(result.content)) return result;
+  const next = access.escape === 'ask'
+    ? 'If this access is necessary for the user’s task, call shell_unsandboxed with the exact command and a short reason to request approval. Do not repeat blocked probes or conclude that network/host access is impossible. Respect rejection; never bypass it.'
+    : 'This agent cannot request host execution. Continue within its allowed locations or explain the required access to the user.';
+  return {...result, content:result.content+'\n[Sandbox boundary: network is disabled, host and protected paths are read-only. '+next+']'};
+}
 function toolResult(result) {
   const { content, ...metadata } = result;
   return { content: content || '(no output)', metadata };
@@ -100,25 +108,49 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
         }
         return;
       }
-      if (event.effect === 'deny' || !['edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;
+      if (event.effect === 'deny' || !['read', 'grep', 'glob', 'external_directory', 'edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;
       try {
         const policy = loadPolicy(policyFile);
         const scope = await sessionScope({ sessionID: event.sessionID });
         const access = agentAccess(policy, event.agent ?? scope.agent);
-        if (event.action === 'sandbox_shell' && !access.shell) {
+        const sensitive = [...privatePaths(), path.dirname(policyFile)].map(canonicalTarget);
+        if (event.action === 'external_directory') {
+          const targets = (event.resources ?? []).map(r => canonicalTarget(r.endsWith('/*') ? r.slice(0,-2) : r));
+          if (targets.length && targets.every(target => !sensitive.some(p=>inside(target,p)) && scope.roots.some(root=>inside(target,root)))) event.effect = 'allow';
+        } else if (['read', 'grep', 'glob'].includes(event.action)) {
+          const search = event.action !== 'read';
+          const targets = search ? [canonicalTarget(path.resolve(scope.directory, event.metadata?.path ?? '.'))]
+            : (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory,r)));
+          if (!targets.length || targets.some(target=>sensitive.some(p=>inside(target,p) || (search && inside(p,target))))) {
+            event.effect='deny'; event.message='Private credentials, configuration and conversation history are protected. Narrow the search to project source, or use sandbox_shell with its private-data masks.';
+          } else if (!search) {
+            // Native reads normalize internal paths to relative resources. Check
+            // canonical absolute rules too, without recursing on absolute checks.
+            const absolute = targets.filter((target,i)=>event.resources[i] !== target);
+            if (absolute.length) await ctx.permission.assert({sessionID:event.sessionID, agent:event.agent, action:'read', resources:absolute,
+              metadata:event.metadata, source:event.source});
+          }
+        } else if (event.action === 'sandbox_shell' && !access.shell) {
           event.effect = 'deny'; event.message = 'Agent terminal access is denied by kit policy';
         } else if (event.action === 'shell_unsandboxed') {
           event.effect = access.escape === 'ask' ? 'ask' : 'deny';
           event.message = access.escape === 'ask' ? 'Run this exact command outside the sandbox with your full user authority?' : 'This agent cannot request a sandbox escape';
         } else if (event.action === 'edit') {
           const roots = scope.roots;
+          let needsDirectory = false;
           const denied = !event.resources?.length || event.resources.some(resource => {
             const target = canonicalTarget(path.resolve(scope.directory, resource));
             const paths = policyPaths();
-            return inside(target, path.dirname(policyFile)) || inside(target, paths.store) || !roots.some(workspace =>
+            if (!sensitive.some(p=>inside(target,p)) && !inside(target,paths.store) && !roots.some(root=>inside(target,root))) needsDirectory = true;
+            return sensitive.some(p=>inside(target,p)) || inside(target, paths.store) || !roots.some(workspace =>
               canEdit(access, target, { workspace, scratch: scratchPath(workspace, canonicalTarget(policy.scratchRoot)) }));
           });
-          if (denied) { event.effect = 'deny'; event.message = 'File write is outside this agent’s approved output locations'; }
+          if (denied) {
+            event.effect = 'deny';
+            event.message = needsDirectory && access.profile === 'workspace-write'
+              ? 'This directory is not approved for this session. Request workspace_approve for the exact directory, then retry the native file tool. A full shell_unsandboxed escape is unnecessary for ordinary additional-workspace files.'
+              : 'File write is outside this agent’s approved output locations or targets a protected path';
+          }
         }
       } catch (error) { event.effect = 'deny'; event.message = error.message; }
     });
@@ -173,7 +205,7 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
             const cwd = fs.realpathSync(path.resolve(directory, input.workdir ?? directory));
             const workspace = approvals.select(approvals.read(tool.sessionID), cwd);
             if (!workspace) throw new Error('Directory is outside this session’s approved workspaces. Request workspace_approve for the exact directory before continuing.');
-            return toolResult(await runSandbox({
+            return toolResult(restrictionHint(await runSandbox({
               workspace, cwd, command: input.command,
               timeout: input.timeout, signal: tool.signal,
               readOnly: access.profile !== 'workspace-write',
@@ -181,7 +213,7 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
               scratchRoot: policy.scratchRoot,
               protectedPaths: [path.dirname(policyFile), policyPaths().store],
               maskedPaths: [path.dirname(policyFile), policyPaths().state],
-            }));
+            }), access));
           } catch (error) {
             return toolResult({ content: error.message, exit_code: 125, truncated: false });
           }
@@ -189,8 +221,8 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
       });
       editor.add({
         name: 'shell_unsandboxed',
-        description: 'Request approval to execute an exact shell command OUTSIDE the sandbox with full host filesystem, credentials, network and device access. Use only after a sandbox restriction or an explicit user request. Every execution asks; no saved approval is requested.',
-        input: inputSchema, options: { codemode: false },
+        description: 'Request approval to execute an exact shell command OUTSIDE the sandbox with full host filesystem, credentials, network and device access. Use only after a sandbox restriction or an explicit user request. For ordinary files in another project directory, prefer workspace_approve and native file tools. Every execution asks; no saved approval is requested.',
+        input: escapeSchema, options: { codemode: false },
         execute: async (input, tool) => {
           if (agentAccess(loadPolicy(policyFile), tool.agent).escape !== 'ask') throw new Error('This agent cannot request a sandbox escape');
           const { directory } = await sessionScope(tool);

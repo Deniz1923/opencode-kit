@@ -245,18 +245,42 @@ falls back to Bash for a missing configured shell wrapper, so wrappers are not
 used as a boundary.
 
 The OS sandbox blocks network and host Unix sockets, uses minimal devices,
-makes the host read-only, protects Git/config/plugin paths, masks common
+makes the host read-only, protects existing Git/config/plugin paths, masks common
 credentials and allows only selected environment variables. Workspace-write can
 delete ordinary project files. Planner gets only its output folders plus scratch.
 Missing bwrap fails closed. Kernel/bwrap vulnerabilities remain possible.
 
 OpenCode itself, native file tools, executable plugins, MCP/LSP servers, web
 tools, and user terminals are outside this shell OS boundary. Native edits use
-application permission checks. Existing plugins retain host authority. Web tools
+application permission checks on canonical targets, including dangling symlinks.
+Native reads also check canonical absolute permissions; searches overlapping
+protected credentials, global config or conversation history are rejected before
+searching. Narrow such searches to source folders, or use the masked sandbox.
+OpenCode data/state, Codex and Claude history, credential directories and kit
+private records are masked using both default and resolved XDG locations.
+Existing plugins retain host authority. Web tools
 ask by policy. Project `.env` is readable to shell tests; native `.env` reads are
 denied. This is not a whole-agent sandbox or complete secret vault. Approved
 escapes run with your full user authority. Host processes under your user can
 access scratch; keep secrets out of it.
+
+Workspace roots, the command's current directory, and existing nested config
+locations have read-only config mounts, including placeholders for absent files.
+Mounts cannot reserve filenames in directories created after a command starts.
+Such new files must not be treated as trusted host code: the global plugin
+allowlist remains in force, and the sandbox component hard-denies all MCP
+servers, even when its runtime plugin is absent. This includes previously
+configured MCP servers; enabling host integrations requires a separate security
+decision and is outside the sandbox component's supported guarantees. Ordinary
+project source and tests remain writable. LSP/formatter integrations and
+same-user host processes remain outside OS confinement; do not assume arbitrary
+project configuration is safe to execute.
+
+Sandbox network/host restriction errors point the model to `shell_unsandboxed`
+when its profile permits requesting approval. Hints never run commands or grant
+approval. Config upgrades preserve stricter user denials. Approving an additional
+directory suppresses repeat boundary prompts for that session while retaining
+file permissions, protected-path guards and read-only/Plan profiles.
 
 `doctor` checks versions, profiles, managed safeguards and real bwrap execution.
 `doctor --full` also runs private OpenCode servers with a local scripted model;

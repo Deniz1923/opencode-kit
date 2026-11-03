@@ -4,7 +4,7 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { INSTALL_DIR } from './sandbox.mjs';
 import { defaultPolicy, explicitlyDenied } from './defaults.mjs';
-import { policyPaths } from './policy.mjs';
+import { policyPaths, privatePaths } from './policy.mjs';
 
 const DROP = new Set(['list', 'todowrite', 'lsp', 'doom_loop']);
 function rules(value) {
@@ -21,7 +21,19 @@ function rules(value) {
 const key = r => JSON.stringify([r.action, r.resource]);
 function enforce(existing, additions) {
   const keys = new Set(additions.map(key));
-  return [...existing.filter(r => !keys.has(key(r))), ...additions];
+  // Installer defaults must not lift an existing denial, including a broader
+  // wildcard or a command-specific denial overridden by a later '*' default.
+  const denies = existing.filter(r => r.effect === 'deny'
+    && !additions.some(a => key(a) === key(r) && a.effect === 'deny')
+    && additions.some(a => a.effect !== 'deny' && (a.action === r.action || a.action === '*' || r.action === '*')));
+  const merged = [...existing.filter(r => !keys.has(key(r))), ...additions];
+  for (const rule of denies) {
+    // Avoid duplicating managed defaults on every upgrade.
+    const i = merged.findIndex(r => key(r) === key(rule) && r.effect === 'deny');
+    if (i >= 0) merged.splice(i, 1);
+    merged.push(rule);
+  }
+  return merged;
 }
 function pluginTarget(entry) {
   const spec = typeof entry === 'string' ? entry : entry.package;
@@ -112,6 +124,10 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   for (const name of immutable) additions.push({ action: 'edit', resource: name + '/**', effect: 'deny' });
   const privateHistory = [paths.kitConfig + '/**', paths.state ?? path.join(paths.store, 'state.json')];
   for (const resource of privateHistory) additions.push({ action: 'read', resource, effect: 'deny' });
+  const privateLocations = [...new Set([...privatePaths(home, {}), paths.configDir, paths.dataDir, paths.stateDir, paths.kitConfig, paths.state].filter(Boolean))];
+  for (const location of privateLocations) for (const resource of [location, location+'/**']) {
+    additions.push({action:'read',resource,effect:'deny'}, {action:'edit',resource,effect:'deny'});
+  }
   out.permissions = enforce(rules(out.permissions ?? out.permission), additions);
   delete out.permission;
   out.plugins = [...(out.plugins ?? [])].filter(entry => (typeof entry === 'string' ? entry : entry.package) !== pluginPath && !previousSandbox(entry));
@@ -121,6 +137,9 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
   const policies = [
     { action: 'tool.use', resource: 'shell:*', effect: 'deny' },
     { action: 'integration.use', resource: 'plugin:*', effect: 'deny' },
+    // A writable project may create configuration in a brand-new directory.
+    // Do not let configuration discovery turn that text into a host process.
+    { action: 'integration.use', resource: 'mcp:*', effect: 'deny' },
     ...out.plugins.map(entry => ({ action: 'integration.use', resource: 'plugin:' + pluginTarget(entry), effect: 'allow' })),
     ...immutable.map(name => ({ action: 'tool.use', resource: 'edit:' + name + '/**', effect: 'deny' })),
     ...privateHistory.map(name => ({ action: 'tool.use', resource: 'read:' + name, effect: 'deny' })),
