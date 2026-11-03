@@ -19,12 +19,23 @@ export function checkCompatibility() {
   for (const key of Object.keys(TESTED)) if (!TESTED[key].includes(result[key])) throw new Error(`Untested ${key} version ${result[key]}; this release requires ${TESTED[key].join(' or ')}`);
   return result;
 }
+export function checkUsageCompatibility(){
+  const installed=version('opencode');
+  if(installed!=='2.2.4')throw new Error('The usage dashboard is tested with OpenCode 2.2.4; found '+installed);
+  return installed;
+}
 export async function doctor(paths, { execute = true } = {}) {
   const checks = []; const check = (name, okay, detail) => checks.push({ name, okay, detail });
   check('platform', supportedPlatform(), `${process.platform}/${process.arch}`);
   let installed;
   try { installed = listInstalled(paths); } catch (e) { check('state', false, e.message); return checks; }
   const sandbox = installed.some(c => c.id === 'sandbox');
+  if(installed.some(c=>c.id==='usage')){
+    try{
+      const v=checkUsageCompatibility(),plan=planInstall(paths,{});
+      check('usage dashboard',!plan.conflicts.length,'OpenCode '+v+'; /usage-live; live metadata only; no history backfill');
+    }catch(e){check('usage dashboard',false,e.message);}
+  }
   if (!sandbox) { check('sandbox', true, 'not installed: kit does not isolate agent commands'); return checks; }
   try { check('versions', true, JSON.stringify(checkCompatibility())); } catch (e) { check('versions', false, e.message); }
   let policy;

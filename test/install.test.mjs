@@ -16,6 +16,27 @@ function fixture(t) {
   return { paths, config };
 }
 const pack = { id: 'agents:alice', name: 'Alice', version: '1', agents: { 'alice/reviewer': { mode: 'subagent', system: 'Review only.' } }, access: { 'alice/reviewer': { profile: 'read-only', shell: true, escape: 'deny' } }, settings: {}, requires: {} };
+test('usage dashboard installs independently, updates idempotently and removes without changing other settings', t=>{
+ const {paths,config}=fixture(t);const initial=fs.readFileSync(config,'utf8');
+ const plan=planInstall(paths,{usage:true});assert.ok(plan.components.some(c=>c.id==='usage'));applyPlan(plan);
+ const installed=parseConfig(fs.readFileSync(config,'utf8'));
+ const entry=installed.plugins.find(p=>p.package?.endsWith('/integrations/usage'));
+ assert.ok(entry);assert.ok(fs.existsSync(path.join(entry.package,'tui.tsx')));
+ assert.ok(fs.existsSync(path.join(entry.package,'collector.mjs')));assert.equal(fs.existsSync(paths.policy),false);
+ assert.equal(installed.model,'mine/model');assert.ok(!installed.permissions);
+ assert.equal(applyPlan(planInstall(paths)).changed,false);
+ applyPlan(planRemoval(paths,'usage'));assert.deepEqual(parseConfig(fs.readFileSync(config,'utf8')),parseConfig(initial));
+});
+
+test('usage dashboard remains allowed with sandbox policy and survives sandbox removal',t=>{
+ const {paths,config}=fixture(t);applyPlan(planInstall(paths,{sandbox:true,usage:true}));
+ let c=parseConfig(fs.readFileSync(config,'utf8'));
+ const usage=c.plugins.find(p=>p.package?.endsWith('/integrations/usage'));assert.ok(usage);
+ assert.ok(c.policies.some(p=>p.resource==='plugin:'+usage.package&&p.effect==='allow'));
+ applyPlan(planRemoval(paths,'sandbox'));c=parseConfig(fs.readFileSync(config,'utf8'));
+ assert.ok(c.plugins.some(p=>p.package?.endsWith('/integrations/usage')));assert.equal(fs.existsSync(paths.policy),false);
+ applyPlan(planRemoval(paths,'usage'));assert.ok(!parseConfig(fs.readFileSync(config,'utf8')).plugins);
+});
 test('managed Superpowers launchers remain directly executable after installation', t => {
   const { paths } = fixture(t); const plan = planInstall(paths, { sandbox: true }); applyPlan(plan);
   const entry = parseConfig(plan.files.find(f => f.path === plan.configFile).after).plugins.at(-1).package;

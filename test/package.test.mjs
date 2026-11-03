@@ -22,6 +22,11 @@ test('packed release installs offline and runs sandbox setup and doctor in a dis
   const launched = spawnSync(launcher, [], { encoding: 'utf8' });
   assert.equal(launched.status, 2, launched.error?.message ?? launched.stderr);
   assert.match(launched.stderr, /usage: task-start/);
+  command(bin,['init','--usage','--apply'],{env});
+  const withUsage=JSON.parse(fs.readFileSync(home+'/.config/opencode/opencode.json'));
+  const usage=withUsage.plugins.find(p=>p.package?.endsWith('/integrations/usage'));
+  assert.ok(usage);assert.ok(fs.existsSync(usage.package+'/tui.tsx'));
+  assert.equal(JSON.parse(fs.readFileSync(usage.package+'/package.json')).exports['./tui'],'./tui.tsx');
   const out = command(bin, ['doctor'], { env }); assert.match(out, /PASS real bubblewrap execution/);
   assert.ok(!out.includes('FAIL'), out);
   command(bin, ['doctor', '--full'], { env, timeout: 60000 });

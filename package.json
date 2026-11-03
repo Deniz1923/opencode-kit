@@ -9,10 +9,11 @@
   "license": "MIT",
   "engines": { "node": ">=22" },
   "bin": { "opencode-kit": "./cli.mjs" },
-  "files": ["index.js", "sandbox.mjs", "policy.mjs", "defaults.mjs", "workflow-policy.mjs", "workspaces.mjs", "integrations/", "config.mjs", "cli.mjs", "kit/", "packs/", "test/opencode_integration.py", "test/probe_opencode.py", "docs/compatibility.md", "docs/deniz-setup.md", "examples/deniz-preferences.jsonc", "README.md", "LICENSE"],
+  "files": ["index.js", "sandbox.mjs", "policy.mjs", "defaults.mjs", "workflow-policy.mjs", "workspaces.mjs", "integrations/", "config.mjs", "cli.mjs", "kit/", "packs/", "test/opencode_integration.py", "test/probe_opencode.py", "test/usage_tui.py", "docs/usage-dashboard.md", "docs/compatibility.md", "docs/deniz-setup.md", "examples/deniz-preferences.jsonc", "README.md", "LICENSE"],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:opencode": "python3 test/opencode_integration.py"
+    "test:opencode": "python3 test/opencode_integration.py",
+    "test:usage-ui": "python3 test/usage_tui.py"
   },
   "dependencies": {
     "jsonc-parser": "^3.3.1",

@@ -237,6 +237,16 @@ Old unreferenced code/backups remain for inspection; no recursive user-data
 cleanup occurs. Sandbox failures and stale workspace locks fail closed. See
 [compatibility notes](docs/compatibility.md) for the rejected wrapper architecture.
 
+## Live usage dashboard
+
+Install the optional dashboard with `node cli.mjs init --usage --apply --restart`
+when your current OpenCode work is finished. Open a session and run `/usage-live`.
+It shows observed request tokens, caching, retries, timing, costs and agent/model
+totals using live metadata. Provider billing and missing cache information stay
+unknown. It requires OpenCode 2.2.4 and adds no model calls or prompt instructions.
+See [usage dashboard](docs/usage-dashboard.md) for controls, installation options
+and the observation window. Your existing `/usage` and `/stats` remain available.
+
 ## Security scope
 
 The plugin-owned `sandbox_shell` runs commands inside bwrap. The built-in agent

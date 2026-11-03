@@ -1,0 +1,7 @@
+{
+  "name": "opencode-kit-usage",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": { ".": "./index.js", "./tui": "./tui.tsx", "./rpc": "./rpc.js" }
+}

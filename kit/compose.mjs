@@ -90,6 +90,13 @@ export function compose(text, selection, resolutions = {}) {
     installed.push({ id: 'workflow:deniz', name: 'Deniz workflow' }); contributions.push({ id: 'workflow:deniz', before, after: structuredClone(config) });
   }
   let policy;
+  if(selection.usage){
+    const before=structuredClone(config), target=selection.pluginPath+'/integrations/usage';
+    const spec=p=>typeof p==='string'?p:p.package;
+    config.plugins=[...(config.plugins??[]).filter(p=>!(spec(p)?.startsWith(paths.store+'/versions/')&&spec(p).endsWith('/integrations/usage'))&&spec(p)!==target),{package:target}];
+    installed.push({id:'usage',name:'Live usage dashboard'});
+    contributions.push({id:'usage',before,after:structuredClone(config)});
+  }
   if (selection.sandbox) {
     const before = structuredClone(config);
     const agents = Object.fromEntries(Object.entries(config.agents ?? config.agent ?? {}).map(([id, raw]) => [id, normalAgent(raw)]));

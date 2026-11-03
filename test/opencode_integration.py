@@ -48,6 +48,8 @@ class ScriptedModel(BaseHTTPRequestHandler):
         for change, ending in [(delta, None), ({}, finish)]:
             chunk = {'id': 'chatcmpl-local-probe', 'object': 'chat.completion.chunk', 'created': int(time.time()),
                      'model': 'test', 'choices': [{'index': 0, 'delta': change, 'finish_reason': ending}]}
+            if ending and getattr(self.server, 'report_usage', False):
+                chunk['usage']={'prompt_tokens':123,'completion_tokens':7,'total_tokens':130,'prompt_tokens_details':{'cached_tokens':23}}
             self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
         self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
@@ -142,6 +144,38 @@ class AgentIntegration(unittest.TestCase):
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-4000:])
         self.assertIn('sandbox-result', json.dumps(context))
         self.assertIn('exit_code', json.dumps(context))
+
+    def test_usage_plugin_records_live_metadata_without_extra_requests(self):
+        self.model.report_usage=True
+        self.config(existing_plugins=[str(ROOT/'integrations/usage')]);sid=self.begin()
+        self.finish(sid)
+        result=self.api('/api/rpc/opencode-kit.usage/snapshot',{'input':{'sessionID':sid}})
+        # The RPC wraps its result independently of regular domain responses.
+        snapshot=result.get('data', result)
+        if 'output' in snapshot: snapshot=snapshot['output']
+        self.assertTrue(snapshot['available'],str(snapshot))
+        self.assertGreaterEqual(snapshot['totals']['modelCalls'],2)
+        self.assertGreaterEqual(snapshot['totals']['steps'],2)
+        self.assertGreaterEqual(snapshot['totals']['tools'],1)
+        self.assertEqual(snapshot['sessions'][0]['latest']['tokens']['input'],100)
+        self.assertEqual(snapshot['sessions'][0]['latest']['tokens']['cacheRead'],23)
+        self.assertNotIn('TOOL_COMPLETE',json.dumps(snapshot))
+        requests=len(self.model.requests)
+        for _ in range(2): self.api('/api/rpc/opencode-kit.usage/snapshot',{'input':{'sessionID':sid}})
+        self.assertEqual(len(self.model.requests),requests)
+        reset=self.api('/api/rpc/opencode-kit.usage/reset',{'input':{'sessionID':sid}})
+        self.assertTrue(reset.get('output',reset.get('data',reset)).get('reset'),str(reset))
+        cleared=self.api('/api/rpc/opencode-kit.usage/snapshot',{'input':{'sessionID':sid}})
+        self.assertEqual(cleared.get('output',cleared.get('data',cleared))['totals']['steps'],0)
+        target=self.host.config/'opencode.json';config=json.loads(target.read_text())
+        config['plugins']=[p for p in config['plugins'] if (p if isinstance(p,str) else p['package'])!=str(ROOT/'integrations/usage')]
+        target.write_text(json.dumps(config))
+        for _ in range(50):
+            response=self.host.api('/api/rpc/opencode-kit.usage/snapshot',{'input':{'sessionID':sid}})
+            if response.returncode==400 and json.loads(response.stdout).get('type')=='rpc.unavailable':break
+            time.sleep(.05)
+        self.assertEqual(response.returncode,400,'Disposable plugin did not unload: '+response.stdout[-1000:])
+        self.assertEqual(json.loads(response.stdout).get('type'),'rpc.unavailable')
 
     def test_title_quota_failure_gets_a_local_title_and_the_normal_reply_still_succeeds(self):
         self.model.reject_titles = True
