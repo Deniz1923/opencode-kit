@@ -128,7 +128,7 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
             // canonical absolute rules too, without recursing on absolute checks.
             const absolute = targets.filter((target,i)=>event.resources[i] !== target);
             if (absolute.length) await ctx.permission.assert({sessionID:event.sessionID, agent:event.agent, action:'read', resources:absolute,
-              metadata:event.metadata, source:event.source});
+              metadata:event.metadata ?? {}, ...(event.source ? {source:event.source} : {})});
           }
         } else if (event.action === 'sandbox_shell' && !access.shell) {
           event.effect = 'deny'; event.message = 'Agent terminal access is denied by kit policy';

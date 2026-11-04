@@ -322,6 +322,19 @@ test('native reads and searches cannot expose protected data through relative pa
   await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'allow');
 });
 
+test('canonical read checks tolerate absent permission metadata and source',async t=>{
+ const h=host(t);fs.writeFileSync(path.join(h.workspace,'normal.txt'),'NORMAL-READ');
+ h.ctx.permission.assert=async input=>{
+  if(input.metadata===null || input.source===null)throw new Error('Expected object at metadata/source');
+  h.requests.push(input);
+ };
+ await h.plugin.setup(h.ctx);
+ const e={action:'read',effect:'allow',agent:'build',sessionID:'ses_test',resources:['normal.txt'],metadata:null,source:null};
+ await h.hooks.get('evaluate')(e);
+ assert.equal(e.effect,'allow',e.message);
+ assert.equal(h.requests.length,1);assert.equal(h.requests[0].resources[0],path.join(h.workspace,'normal.txt'));
+});
+
 test('session-approved directory boundaries stop asking without overriding denials', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
   const second = path.join(h.root, 'second'); fs.mkdirSync(second);

@@ -474,6 +474,13 @@ class AgentIntegration(unittest.TestCase):
         context, _ = self.finish(self.begin(), decision='once')
         self.assertFalse(target.exists(), json.dumps(context)[-2000:])
 
+    def test_normal_native_read_succeeds_with_canonical_permission_check(self):
+        target=self.project/'normal.txt';target.write_text('NATIVE-READ-SENTINEL')
+        self.config();self.model.tool='read';self.model.arguments={'path':str(target)}
+        context,prompts=self.finish(self.begin(),decision='reject')
+        outputs=[p.get('state',{}).get('content',[]) for m in context['data'] for p in m.get('content',[]) if p.get('type')=='tool']
+        self.assertIn('NATIVE-READ-SENTINEL',json.dumps(outputs));self.assertFalse(prompts)
+
     def test_absolute_read_denial_applies_when_path_is_internal(self):
         target = self.project / 'private-fixture.txt'; target.write_text('SYNTHETIC-PRIVATE-SENTINEL')
         self.config(source_permissions=[{'action':'read', 'resource':str(target), 'effect':'deny'}])
