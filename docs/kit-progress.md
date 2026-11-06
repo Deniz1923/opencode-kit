@@ -4,7 +4,7 @@ Plan: docs/superpowers/plans/2026-10-25-selectable-kit.md
 Spec: docs/superpowers/specs/2026-10-25-selectable-kit-design.md
 Base: f35339f
 
-Execution: inline, authorized by Deniz's instruction to go ahead. Existing live source is preserved at /home/deniz/Projects/opencode-sandbox; development is on branch selectable-kit.
+Execution: inline, authorized by Deniz's instruction to go ahead. Existing live source is preserved in a separate local worktree; development is on branch selectable-kit.
 
 Preflight interfaces: trusted policy -> plugin and composer; validated agent data -> composer; composition -> transaction planner; transaction -> CLI/doctor. Keep native shell hard policy and capability enforcement inseparable from sandbox installation.
 

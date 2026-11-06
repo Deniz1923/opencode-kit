@@ -118,7 +118,7 @@ read-only, with only the approved planning roots made writable.
 ## Installer state and data handling
 
 - Derive paths from the current user's Linux/XDG environment; never export
-  `/home/deniz` paths or private auth/session data as someone else's defaults.
+  machine-specific home paths or private auth/session data as someone else's defaults.
 - Use a stable, versioned managed store for plugin code and pack contents.
   Keep records of source commits/versions, hashes and ownership of generated
   files/rules. Protect this store and the trusted profile file from agent edits.

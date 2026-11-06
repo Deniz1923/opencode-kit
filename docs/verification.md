@@ -67,7 +67,7 @@ failure in the replacement implementation's test suite.
 ## Approved rollout
 
 - Backed up the original config to
-  `/home/deniz/.config/opencode/opencode.json.bak.20261025-114144-800083`.
+  `~/.config/opencode/opencode.json.bak.<timestamp>`.
 - Atomically installed the reviewed preview as the global config.
 - `opencode service restart` completed outside the outer Codex sandbox.
 - Live service status returned `http://127.0.0.1:49374`.

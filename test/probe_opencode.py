@@ -155,7 +155,7 @@ class ShellCompatibility(unittest.TestCase):
         result = self.api('config.get')
         self.assertEqual(result.returncode, 0, self.last)
         self.assertIn(str(self.config), result.stdout)
-        self.assertNotIn('/home/deniz/.config/opencode/opencode.json', result.stdout)
+        self.assertNotIn(str(Path.home() / '.config/opencode/opencode.json'), result.stdout)
 
 
 if __name__ == '__main__':

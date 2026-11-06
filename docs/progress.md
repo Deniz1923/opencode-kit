@@ -1,7 +1,7 @@
 # Execution ledger — OpenCode sandbox
 
-Source plan: /home/deniz/.config/opencode/docs/superpowers/plans/2026-10-25-opencode-sandbox.md
-Spec: /home/deniz/.config/opencode/docs/superpowers/specs/2026-10-24-opencode-sandbox-design.md
+Source plan: ~/.config/opencode/docs/superpowers/plans/2026-10-25-opencode-sandbox.md
+Spec: ~/.config/opencode/docs/superpowers/specs/2026-10-24-opencode-sandbox-design.md
 
 ## Decisions
 

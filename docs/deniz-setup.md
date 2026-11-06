@@ -23,11 +23,11 @@ They retain host authority; install them only if you want that workflow.
 
 ## Fresh installation
 
-Install the supported OpenCode/bwrap/Node/Git versions listed in the README,
-authenticate GitHub, and obtain access to this private repository. Then:
+Install the supported OpenCode/bwrap/Node/Git versions listed in the README, then
+clone the public repository:
 
 ```sh
-gh repo clone Deniz1923/opencode-kit
+git clone https://github.com/Deniz1923/opencode-kit.git
 cd opencode-kit
 npm ci --ignore-scripts
 node cli.mjs init
