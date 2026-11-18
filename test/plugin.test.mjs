@@ -6,7 +6,7 @@ import os from 'node:os';
 import { createPlugin } from '../index.js';
 import { policyPaths } from '../policy.mjs';
 
-function host(t, { deny = false } = {}) {
+function host(t, { deny = false, nativeTemp = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-plugin-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, 'project'); fs.mkdirSync(workspace);
@@ -20,7 +20,8 @@ function host(t, { deny = false } = {}) {
     'foreign/reviewer':{profile:'read-only',shell:true,escape:'deny'},
     'strict/reviewer':{profile:'read-only',shell:false,escape:'deny'}
   }}), {mode:0o600});
-  const plugin = createPlugin({ policyFile });
+  const nativeTempRoot = path.join(root, 'opencode-tmp');
+  const plugin = createPlugin({ policyFile, ...(nativeTemp ? {nativeTempRoot} : {}) });
   const ctx = {
     options: { scratchRoot: path.join(root, 'scratch') },
     location: { directory: workspace, project: { canonical: workspace } },
@@ -35,7 +36,7 @@ function host(t, { deny = false } = {}) {
     tool: { transform: async fn => fn({ add: tool => tools.set(tool.name, tool) }) },
   };
   const toolCtx = { sessionID: 'ses_test', agent: 'build', messageID: 'msg_test', id: 'call_test', signal: new AbortController().signal };
-  return { root, workspace, tools, hooks, requests, ctx, toolCtx, plugin, policyFile };
+  return { root, workspace, tools, hooks, requests, ctx, toolCtx, plugin, policyFile, nativeTempRoot };
 }
 
 const bootstrap = '<EXTREMELY_IMPORTANT>\nYou have superpowers.\n\n**IMPORTANT: The using-superpowers skill content is included below. It is ALREADY LOADED**\nWorkflow instructions\n**Tool Mapping for OpenCode:**\n</EXTREMELY_IMPORTANT>';
@@ -345,6 +346,25 @@ test('session-approved directory boundaries stop asking without overriding denia
   }
   const e = {action:'external_directory', resources:[h.root+'/*'], effect:'ask', agent:'build', sessionID:'ses_test'};
   await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'ask');
+});
+
+test('native OpenCode temp access preserves directory, profile, and protected-file boundaries', async t => {
+  const h = host(t, {nativeTemp:true}); await h.plugin.setup(h.ctx);
+  fs.mkdirSync(h.nativeTempRoot, {mode:0o700});
+  const evaluate = async (action, resource, agent = 'build', effect = 'ask') => {
+    const event = {action, effect, agent, sessionID:'ses_test', resources:[resource]};
+    await h.hooks.get('evaluate')(event);
+    return event.effect;
+  };
+  const folder = h.nativeTempRoot + '/generated';
+  assert.equal(await evaluate('external_directory', folder + '/*'), 'allow');
+  assert.equal(await evaluate('external_directory', folder + '/*', 'build', 'deny'), 'deny');
+  assert.equal(await evaluate('external_directory', h.root + '/*'), 'ask');
+  assert.equal(await evaluate('edit', folder + '/output.txt', 'build', 'allow'), 'allow');
+  assert.equal(await evaluate('edit', folder + '/output.txt', 'explore', 'allow'), 'deny');
+  assert.equal(await evaluate('edit', folder + '/opencode.json', 'build', 'allow'), 'deny');
+  fs.chmodSync(h.nativeTempRoot, 0o777);
+  assert.equal(await evaluate('external_directory', folder + '/*'), 'ask');
 });
 
 test('ordinary shell has no approval reason field and restriction failures explain the approval route', async t => {

@@ -46,10 +46,15 @@ function localTitle(messages) {
   return title ? title[0].toLocaleUpperCase() + title.slice(1) : undefined;
 }
 
-export function createPlugin({ policyFile = policyPaths().policy } = {}) { return {
+export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot = '/tmp/opencode' } = {}) { return {
   id: 'opencode-workspace-sandbox',
   async setup(ctx) {
     const approvals = workspaceStore(path.join(path.dirname(policyFile), 'workspaces'));
+    function isNativeTemp(target) {
+      if (!inside(target, nativeTempRoot)) return false;
+      const stat = fs.lstatSync(nativeTempRoot, { throwIfNoEntry: false });
+      return stat?.isDirectory() && stat.uid === process.getuid() && !(stat.mode & 0o022);
+    }
     const initialDirectory = fs.realpathSync(ctx.location.directory);
     let initialWorkspace = initialDirectory;
     if (ctx.location.project?.canonical) {
@@ -116,7 +121,8 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
         const sensitive = [...privatePaths(), path.dirname(policyFile)].map(canonicalTarget);
         if (event.action === 'external_directory') {
           const targets = (event.resources ?? []).map(r => canonicalTarget(r.endsWith('/*') ? r.slice(0,-2) : r));
-          if (targets.length && targets.every(target => !sensitive.some(p=>inside(target,p)) && scope.roots.some(root=>inside(target,root)))) event.effect = 'allow';
+          if (targets.length && targets.every(target => !sensitive.some(p=>inside(target,p))
+            && (isNativeTemp(target) || scope.roots.some(root=>inside(target,root))))) event.effect = 'allow';
         } else if (['read', 'grep', 'glob'].includes(event.action)) {
           const search = event.action !== 'read';
           const targets = search ? [canonicalTarget(path.resolve(scope.directory, event.metadata?.path ?? '.'))]
@@ -137,13 +143,17 @@ export function createPlugin({ policyFile = policyPaths().policy } = {}) { retur
           event.message = access.escape === 'ask' ? 'Run this exact command outside the sandbox with your full user authority?' : 'This agent cannot request a sandbox escape';
         } else if (event.action === 'edit') {
           const roots = scope.roots;
+          const scratchRoot = canonicalTarget(policy.scratchRoot);
           let needsDirectory = false;
           const denied = !event.resources?.length || event.resources.some(resource => {
             const target = canonicalTarget(path.resolve(scope.directory, resource));
             const paths = policyPaths();
-            if (!sensitive.some(p=>inside(target,p)) && !inside(target,paths.store) && !roots.some(root=>inside(target,root))) needsDirectory = true;
-            return sensitive.some(p=>inside(target,p)) || inside(target, paths.store) || !roots.some(workspace =>
-              canEdit(access, target, { workspace, scratch: scratchPath(workspace, canonicalTarget(policy.scratchRoot)) }));
+            if (sensitive.some(p=>inside(target,p)) || inside(target, paths.store)) return true;
+            if (access.profile === 'workspace-write' && isNativeTemp(target) && target !== nativeTempRoot
+              && !inside(target, scratchRoot) && !inside(scratchRoot, target)
+              && canEdit(access, target, { workspace: nativeTempRoot, scratch: scratchRoot })) return false;
+            if (!roots.some(root=>inside(target,root))) needsDirectory = true;
+            return !roots.some(workspace => canEdit(access, target, { workspace, scratch: scratchPath(workspace, scratchRoot) }));
           });
           if (denied) {
             event.effect = 'deny';

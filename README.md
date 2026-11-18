@@ -93,6 +93,12 @@ Approval records contain only session IDs and directory paths in the private
 not contain conversation text. Workspace approval does not authorize network
 access or unsandboxed execution.
 
+Native tools can read under host `/tmp/opencode` without an additional directory
+approval when that directory is owned by the OpenCode user and writable only
+by that user. Workspace-write agents can also edit ordinary files there.
+Existing file denials, agent profiles, and project scratch write rules still
+apply. Shell commands continue to use their isolated `/tmp`.
+
 ## Chat without coding overhead
 
 The Deniz Chat agent keeps its original conversational prompt and model choice.
