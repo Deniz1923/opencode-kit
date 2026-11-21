@@ -94,7 +94,22 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
     await ctx.session.hook('context', async event => {
       // This runs before the model can call a session-moving host utility.
       if (event.sessionID) await approvedRoots(event.sessionID, await ctx.session.get({ sessionID: event.sessionID }));
-      if (event.agent?.split('/').at(-1) !== 'chat') return;
+      const role = event.agent?.split('/').at(-1);
+      if (role === 'build') {
+        // Only handle newly delivered OpenCode notices. A user or tool can quote the markup.
+        const messages = event.messages ?? [];
+        const newest = messages.slice(messages.findLastIndex(message => message.role === 'assistant') + 1);
+        const reports = newest.filter(message => message.metadata?.source === 'subagent');
+        const guidance = [];
+        if (reports.some(message => ['error', 'cancelled'].includes(message.metadata.state))) {
+          guidance.push('A subagent failed or was cancelled. Keep useful evidence already delivered and complete the missing work yourself if the parent task is still authorized. Do not relaunch a cancelled child. After a model failure, retry once only if the user explicitly approved a fallback model for this work. Do not retry a permission denial.');
+        }
+        if (reports.some(message => message.metadata.state === 'completed')) {
+          guidance.push('A subagent report arrived. Resume the original task from its current state, use the findings, and complete pending implementation and verification. If the report lists work still running, keep that work pending.');
+        }
+        if (guidance.length) event.system.push({ type: 'text', text: 'Subagent handoff: ' + guidance.join(' ') });
+      }
+      if (role !== 'chat') return;
       const rules = await workflowPermissions(ctx, event.agent);
       const denied = action => deniedAction(rules, action);
       // Newer hosts may advertise a denied tool. Keep authority in permission

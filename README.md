@@ -179,6 +179,13 @@ fixes and relevant verification without automatically restarting the whole
 process. Independent work gets focused subagent briefs; tightly coupled changes
 are implemented directly by default.
 
+OpenCode delivers background child reports to the parent session. Build uses the
+report to pick up pending work, including verification. After a failed or
+cancelled child, Build can finish directly with its existing permissions. To
+allow one retry after a child model failure, tell Build the exact fallback
+model, such as `opencode/hy4-flash-free`, and authorize it for that task.
+Build uses the same child session so it can keep the existing context.
+
 The prompt's standalone line `Use a workflow proportional to the task.` opts
 Build out of Superpowers' automatic startup dispatcher while keeping all skills
 available. Other authors' Build prompts retain their current behavior unless
