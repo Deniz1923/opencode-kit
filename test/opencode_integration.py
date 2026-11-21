@@ -140,6 +140,27 @@ class AgentIntegration(unittest.TestCase):
         (ARTIFACTS / 'failed-context.json').write_text(json.dumps(context, indent=2))
         self.fail('Agent did not finish. Context tail: ' + text[-3000:] + '; model requests: ' + str(len(self.model.requests)))
 
+    def test_agents_only_plan_cannot_write_or_delegate_through_native_tools(self):
+        self.config(plugin=False)
+        target = self.host.config / 'opencode.json'
+        config = json.loads(target.read_text())
+        for key in ('agents', 'default_agent', 'permissions', 'policies'):
+            config.pop(key, None)
+        target.write_text(json.dumps(config))
+        subprocess.run(['node', str(ROOT / 'cli.mjs'), 'init', '--agents', 'deniz', '--apply'],
+                       env=self.host.env, capture_output=True, text=True, check=True)
+        config = json.loads(target.read_text())
+        config['default_agent'] = 'deniz/plan'
+        target.write_text(json.dumps(config))
+        self.model.tool = 'write'
+        marker = self.project / 'blocked.md'
+        self.model.arguments = {'path': str(marker), 'content': 'Unexpected write'}
+        self.finish(self.begin())
+        schemas = [item['function']['name'] for request in self.model.requests for item in request.get('tools', [])]
+        self.assertIn('read', schemas)
+        self.assertFalse({'shell', 'execute', 'subagent'} & set(schemas), schemas)
+        self.assertFalse(marker.exists())
+
     def test_sandbox_tool_runs_through_real_opencode(self):
         self.config(); context, _ = self.finish(self.begin())
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-4000:])

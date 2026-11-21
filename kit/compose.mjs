@@ -71,8 +71,21 @@ export function compose(text, selection, resolutions = {}) {
     }
     const before = structuredClone(config); const names = [], renamed = {};
     for (const [id, value] of Object.entries(pack.agents)) {
-      overrides[id] = pack.access[id];
-      const merged = merge(['agents', id], value, pack.id);
+      const access = pack.access[id];
+      overrides[id] = access;
+      let proposed = value;
+      if (!selection.sandbox) {
+        const blocked = access.profile !== 'workspace-write'
+          ? ['edit', 'shell', 'execute', 'subagent', 'sandbox_shell', 'shell_unsandboxed']
+          : access.shell ? [] : ['shell', 'execute', 'sandbox_shell', 'shell_unsandboxed'];
+        if (blocked.length) {
+          proposed = { ...value, permissions: [
+            ...(value.permissions ?? []).filter(rule => !blocked.includes(rule.action) || rule.resource !== '*'),
+            ...blocked.map(action => ({ action, resource: '*', effect: 'deny' })),
+          ] };
+        }
+      }
+      const merged = merge(['agents', id], proposed, pack.id);
       if (merged.used) { overrides[merged.name] = pack.access[id]; names.push(merged.name); renamed[id] = merged.name; }
       if (merged.name !== id) delete overrides[id];
     }

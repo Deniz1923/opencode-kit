@@ -10,7 +10,7 @@ import { planInstall, applyPlan, planRemoval, listInstalled, installedSelection,
 import { doctor, supportedPlatform, checkCompatibility,checkUsageCompatibility } from './kit/doctor.mjs';
 export { supportedPlatform };
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const help = `OpenCode kit (Linux x86-64; OpenCode 2.1.3, bwrap 0.13.1)
+const help = `OpenCode kit (Linux x86-64)
   opencode-kit init                         Interactive setup
   opencode-kit init --sandbox --agents deniz --workflow --apply
   opencode-kit init --usage --apply
@@ -27,7 +27,7 @@ Options:
   --agents SOURCE    Include a data-only agent pack (repeatable)
   --namespace NAME   Namespace for an added pack
   --workflow         Include optional todo/delegation preferences
-  --usage            Include the metadata-only /usage-live dashboard (OpenCode 2.2.4)
+  --usage            Include the metadata-only /usage-live dashboard (OpenCode 2.2.4 or 2.3.2)
   --ponytail         Include optional Ponytail 5.3.3 text skills (no hooks)
   --profile ID=ROLE  read-only, planner, or workspace-write (repeatable)
   --escape ID=VALUE  ask or deny (repeatable; explicit denials remain)
@@ -102,8 +102,8 @@ export async function main(argv = process.argv.slice(2)) {
     if (command === 'init' && !o.sandbox && !o.agents.length && !o.workflow && !o.usage && !o.ponytail) {
       if (!interactive) throw new Error('Select --sandbox, --agents SOURCE, --workflow, --usage or --ponytail; run init in a terminal for the menu');
       prompts = promptSession();
-      const answer = await prompts.ask('Choose components:\n1. Sandbox + Deniz agents + workflow + usage (recommended)\n2. Sandbox only\n3. Deniz agents only\n4. Usage dashboard only\n5. Cancel\n6. Ponytail skills only');
-      if (answer === '1') { o.sandbox = true; o.agents.push('deniz'); o.workflow = true; o.usage=true; }
+      const answer = await prompts.ask('Choose components:\n1. Sandbox + Deniz agents + workflow (recommended)\n2. Sandbox only\n3. Deniz agents only\n4. Usage dashboard only\n5. Cancel\n6. Ponytail skills only');
+      if (answer === '1') { o.sandbox = true; o.agents.push('deniz'); o.workflow = true; }
       else if (answer === '2') o.sandbox = true;
       else if (answer === '3') o.agents.push('deniz');
       else if(answer==='4')o.usage=true;
@@ -133,8 +133,6 @@ export async function main(argv = process.argv.slice(2)) {
         ...Object.keys(existing.profiles ?? {}).filter(id => existing.profiles[id].profile === 'planner')]);
       for (const id of ids) (selection.profiles[id] ??= {}).planningRoots = o.planningRoot;
     }
-    if (selection.sandbox || existing.sandbox) checkCompatibility();
-    if((selection.usage||existing.usage)&&!(command==='remove'&&kind==='usage'))checkUsageCompatibility();
     const resolutions = o.resolve ? JSON.parse(fs.readFileSync(o.resolve, 'utf8')) : {};
     const build = () => command === 'remove' ? planRemoval(paths, kind, resolutions) : planInstall(paths, selection, resolutions);
     let plan = build(); preview(plan);
@@ -152,6 +150,10 @@ export async function main(argv = process.argv.slice(2)) {
     let apply = o.apply;
     if (!apply && interactive) { prompts ??= promptSession(); apply = await prompts.ask('Apply this preview?\n1. Apply\n2. Cancel (recommended until reviewed)') === '1'; }
     if (!apply) { console.log('Preview only. Add --apply to apply this selection.'); return; }
+    if (command !== 'remove') {
+      if (plan.components.some(component => component.id === 'sandbox')) checkCompatibility();
+      if (plan.components.some(component => component.id === 'usage')) checkUsageCompatibility();
+    }
     const result = applyPlan(plan); console.log(result.changed ? 'Applied. Backup: ' + result.backup : 'Already up to date');
     let restart = o.restart;
     if (!restart && interactive && result.changed) { prompts ??= promptSession(); restart = await prompts.ask('Restart OpenCode to load the changes?\n1. Restart\n2. Later') === '1'; }

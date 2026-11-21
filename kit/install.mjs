@@ -98,7 +98,7 @@ function codeFiles(paths) {
   include('integrations/superpowers');
   include('integrations/usage');
   include('integrations/ponytail');
-  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.2.0', private: true }), 0o600]);
+  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.3.0', private: true }), 0o600]);
   const hash = digest(json(content)); const directory = path.join(paths.store, 'versions', hash.slice(0, 20));
   return { directory, hash, files: content.map(([name, after, mode]) => ({ path: path.join(directory, name), after, mode })) };
 }
@@ -134,16 +134,24 @@ export function planInstall(paths, requested = {}, resolutions = {}, { remove } 
       } else if (choice?.action !== 'replace') conflicts.push({ key: 'owned:policy', path: ['trusted policy'], owner: 'sandbox', current: currentPolicy, proposed: state.policy, rename: false });
     }
   }
-  const code = codeFiles(paths); selection.pluginPath = code.directory;
+  const needsCode = selection.sandbox || selection.usage || selection.ponytail;
+  let code;
+  if (needsCode && remove) {
+    const hash = state.codeHash;
+    if (typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid installed code hash');
+    // Removing a component must not activate a different runtime version.
+    code = { hash, directory: path.join(paths.store, 'versions', hash.slice(0, 20)), files: [] };
+  } else if (needsCode) code = codeFiles(paths);
+  selection.pluginPath = code?.directory;
   const composed = compose(patchConfig(configText, baseline), selection, { ...state?.resolutions, ...resolutions });
   conflicts.push(...composed.conflicts);
   const storedSelection = { ...selection }; delete storedSelection.paths; delete storedSelection.pluginPath;
   const nextState = { schemaVersion: 1, configFile: file, baseline, installed: composed.config, selection: storedSelection,
-    components: composed.components, resolutions: { ...state?.resolutions, ...resolutions }, policy: composed.policy ?? null, codeHash: selection.sandbox || selection.usage || selection.ponytail ? code.hash : null };
+    components: composed.components, resolutions: { ...state?.resolutions, ...resolutions }, policy: composed.policy ?? null, codeHash: code?.hash ?? null };
   const finalText = patchConfig(configText, composed.config);
   const files = [{ path: file, after: finalText }, { path: paths.policy, after: composed.policy ? json(composed.policy) : retainPolicy ?? null }, { path: paths.state, after: json(nextState) }];
   if (!selection.sandbox && !state?.selection.sandbox) files.splice(1, 1);
-  if (selection.sandbox || selection.usage || selection.ponytail) files.unshift(...code.files);
+  if (code) files.unshift(...code.files);
   for (const f of files) {
     f.before = read(f.path, f.path !== file);
     if (inside(f.path, path.join(paths.store, 'versions')) && f.before !== null && f.before !== f.after) throw new Error('Managed code integrity changed: ' + f.path);

@@ -15,7 +15,7 @@ node cli.mjs remove usage --apply --restart
 ```
 
 It can be installed on its own or combined with sandbox and agent components.
-It requires Linux x86-64, Node.js 22+, and OpenCode 2.2.4. Bubblewrap is only
+It requires Linux x86-64, Node.js 22+, and OpenCode 2.2.4 or 2.3.2. Bubblewrap is only
 needed if the sandbox component is selected. Applying creates the usual managed
 backup; preview never changes live settings.
 

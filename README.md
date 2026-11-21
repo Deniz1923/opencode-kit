@@ -10,15 +10,16 @@ repository to install it. License: MIT.
 
 ## Install
 
-Requirements: **Linux x86-64**, OpenCode **2.1.3, 2.1.4, 2.2.1, 2.2.3 or 2.2.4**, bubblewrap **0.13.1**, Git,
-Node.js 22+. Tested on CachyOS with Node.js **26.12.1**. Other OpenCode/bwrap
-versions are rejected until compatibility is tested. Agent prompts are ordinary
-text; this installer and OS sandbox target Linux only.
+The installer targets **Linux x86-64** and requires Git and Node.js 22+.
+The sandbox supports OpenCode **2.1.3, 2.1.4, 2.2.1, 2.2.3, 2.2.4 and 2.3.2**
+with bubblewrap **0.13.1**. The optional usage dashboard supports **2.2.4 and
+2.3.2**. Agent packs and text skills can be installed separately. Preview,
+removal and transaction recovery remain available after an OpenCode upgrade.
 
 Clone the repository:
 
 ```sh
-git clone https://github.com/Deniz1923/opencode-kit.git
+git clone --branch v0.3.0 https://github.com/Deniz1923/opencode-kit.git
 cd opencode-kit
 npm ci --ignore-scripts
 node cli.mjs init
@@ -49,7 +50,10 @@ node cli.mjs remove sandbox --apply
 ```
 
 Restart OpenCode after applying, or explicitly append `--restart`.
-Sandbox-only keeps your prompts. Agents-only does not install a sandbox.
+Sandbox-only keeps your prompts. In agents-only mode, Deniz Plan, Explore,
+Reviewer, Debugger and Test Engineer can inspect files. The kit denies edits,
+terminal commands, Code Mode and delegation for those roles until the sandbox
+is installed. Run tests from Build in agents-only mode.
 Existing executable plugins are preserved; agent packs cannot install plugins.
 Deniz's Build prompt uses todos, so its pack visibly declares the todo dependency.
 Keeping an existing disabled todo setting skips the dependent pack.
@@ -286,7 +290,7 @@ Install the optional dashboard with `node cli.mjs init --usage --apply --restart
 when your current OpenCode work is finished. Open a session and run `/usage-live`.
 It shows observed request tokens, caching, retries, timing, costs and agent/model
 totals using live metadata. Provider billing and missing cache information stay
-unknown. It requires OpenCode 2.2.4 and adds no model calls or prompt instructions.
+unknown. It requires OpenCode 2.2.4 or 2.3.2 and adds no model calls or prompt instructions.
 See [usage dashboard](docs/usage-dashboard.md) for controls, installation options
 and the observation window. Your existing `/usage` and `/stats` remain available.
 
@@ -316,8 +320,7 @@ protected credentials, global config or conversation history are rejected before
 searching. Narrow such searches to source folders, or use the masked sandbox.
 OpenCode data/state, Codex and Claude history, credential directories and kit
 private records are masked using both default and resolved XDG locations.
-Existing plugins retain host authority. Web tools
-ask by policy. Project `.env` is readable to shell tests; native `.env` reads are
+Existing plugins retain host authority. Web tools are allowed by default. Project `.env` is readable to shell tests; native `.env` reads are
 denied. This is not a whole-agent sandbox or complete secret vault. Approved
 escapes run with your full user authority. Host processes under your user can
 access scratch; keep secrets out of it.

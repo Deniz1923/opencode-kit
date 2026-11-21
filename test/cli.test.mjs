@@ -19,6 +19,12 @@ test('dry-run changes no config; selected agent pack installs, lists, updates an
   r = run('init', '--agents', 'deniz', '--apply'); assert.equal(r.status, 0, r.stderr);
   let config = JSON.parse(fs.readFileSync(home + '/.config/opencode/opencode.json'));
   assert.ok(config.agents['deniz/build']); assert.equal(config.experimental.todo, true); assert.ok(!config.plugins);
+  for (const id of ['plan', 'explore', 'code-reviewer', 'debugger', 'test-engineer']) {
+    for (const action of ['edit', 'shell', 'execute', 'subagent']) {
+      assert.ok(config.agents['deniz/' + id].permissions.some(r => r.action === action && r.resource === '*' && r.effect === 'deny'));
+    }
+  }
+  assert.ok(!config.agents['deniz/build'].permissions?.some(r => r.action === 'shell' && r.effect === 'deny'));
   assert.match(run('list').stdout, /agents:deniz/);
   r = run('update', '--apply'); assert.equal(r.status, 0, r.stderr);
   r = run('remove', 'agents:deniz', '--apply'); assert.equal(r.status, 0, r.stderr);
@@ -64,4 +70,31 @@ test('usage-only CLI supports preview, apply, doctor, update and removal without
  r=run('update','usage','--apply');assert.equal(r.status,0,r.stderr);
  r=run('remove','usage','--apply');assert.equal(r.status,0,r.stderr);
  assert.equal(run('list').stdout.trim(),'No kit components installed');
+});
+
+test('unsupported OpenCode permits previews and removal without changing surviving runtime paths', t => {
+  const { home, env, run } = fixture(t);
+  const bin = home + '/bin';
+  fs.mkdirSync(bin);
+  const setVersion = version => fs.writeFileSync(bin + '/opencode', '#!/bin/sh\necho ' + version + '\n', { mode: 0o700 });
+  env.PATH = bin + ':' + env.PATH;
+  setVersion('2.3.2');
+  let r = run('init', '--usage', '--ponytail', '--apply');
+  assert.equal(r.status, 0, r.stderr);
+  const file = home + '/.config/opencode/opencode.json';
+  const config = JSON.parse(fs.readFileSync(file));
+  setVersion('99.0.0');
+  for (const args of [['update'], ['remove', 'ponytail'], ['init', '--sandbox']]) {
+    r = run(...args, '--dry-run');
+    assert.equal(r.status, 0, r.stderr);
+  }
+  r = run('update', '--apply');
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /found 99\.0\.0/);
+  r = run('remove', 'ponytail', '--apply');
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)).plugins, config.plugins);
+  r = run('remove', 'usage', '--apply');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(run('recover').stdout, /Recovery complete/);
 });

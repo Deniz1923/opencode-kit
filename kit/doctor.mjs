@@ -5,7 +5,7 @@ import { planInstall, listInstalled } from './install.mjs';
 import { loadPolicy } from '../policy.mjs';
 import { runSandbox } from '../sandbox.mjs';
 
-export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3', '2.2.4'], bwrap: ['0.13.1'] };
+export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3', '2.2.4', '2.3.2'], bwrap: ['0.13.1'] };
 export const supportedPlatform = (platform = process.platform, arch = process.arch) => platform === 'linux' && arch === 'x64';
 function version(command) {
   const r = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
@@ -19,9 +19,10 @@ export function checkCompatibility() {
   for (const key of Object.keys(TESTED)) if (!TESTED[key].includes(result[key])) throw new Error(`Untested ${key} version ${result[key]}; this release requires ${TESTED[key].join(' or ')}`);
   return result;
 }
-export function checkUsageCompatibility(){
-  const installed=version('opencode');
-  if(installed!=='2.2.4')throw new Error('The usage dashboard is tested with OpenCode 2.2.4; found '+installed);
+export function checkUsageCompatibility() {
+  const tested = ['2.2.4', '2.3.2'];
+  const installed = version('opencode');
+  if (!tested.includes(installed)) throw new Error('The usage dashboard requires OpenCode ' + tested.join(' or ') + '; found ' + installed);
   return installed;
 }
 export async function doctor(paths, { execute = true } = {}) {
