@@ -30,6 +30,12 @@ export async function doctor(paths, { execute = true } = {}) {
   let installed;
   try { installed = listInstalled(paths); } catch (e) { check('state', false, e.message); return checks; }
   const sandbox = installed.some(c => c.id === 'sandbox');
+  if (installed.some(c => c.id === 'ponytail')) {
+    try {
+      const plan = planInstall(paths, {});
+      check('Ponytail skills', !plan.conflicts.length, 'Ponytail 5.3.3; native text skills; main mode explicit-only; existing agent permissions retained');
+    } catch (e) { check('Ponytail skills', false, e.message); }
+  }
   if(installed.some(c=>c.id==='usage')){
     try{
       const v=checkUsageCompatibility(),plan=planInstall(paths,{});

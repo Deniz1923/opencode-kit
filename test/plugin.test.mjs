@@ -157,6 +157,17 @@ test('denied escapes never spawn and propagate the rejection reason', async t =>
   assert.ok(!fs.existsSync(marker));
 });
 
+test('both shell tools include exit codes in model-visible output', async t => {
+  const h = host(t); await h.plugin.setup(h.ctx);
+  for (const name of ['sandbox_shell', 'shell_unsandboxed']) {
+    for (const code of [0, 7]) {
+      const result = await h.tools.get(name).execute({ command: 'exit ' + code }, h.toolCtx);
+      assert.equal(result.metadata.exit_code, code);
+      assert.match(result.content, new RegExp('\\[exit_code: ' + code + '\\]'));
+    }
+  }
+});
+
 test('permitted escapes run only after the permission assertion', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
   const marker = path.join(h.root, 'approved');

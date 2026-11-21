@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/DietrichGebert/ponytail",
+  "version": "5.3.3",
+  "ref": "v5.3.3",
+  "license": "MIT",
+  "upstreamSha256": {
+    "skills/ponytail/SKILL.md": "9badd22a32e19cb884e46dfa8d3aae82bb81dfa5484105b8b4f0262df823a509",
+    "skills/ponytail-review/SKILL.md": "33fe4ebe22a460924e5d4a261e223df22e409cc94ab76182bee9fb91a3ef022e",
+    "skills/ponytail-audit/SKILL.md": "2b3223a02c386d1263e1b08343cb8eb3a53e444cdafb1d79e26c8ec2a8fcad28"
+  },
+  "adaptations": [
+    "Main skill sets metadata.opencode/autoinvoke=false for explicit loading only.",
+    "OpenCode @skill mentions replace slash-command examples.",
+    "Only three text skills are included; no executable upstream plugins, hooks, telemetry or installers."
+  ]
+}

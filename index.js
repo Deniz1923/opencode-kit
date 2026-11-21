@@ -25,7 +25,8 @@ function restrictionHint(result, access) {
 }
 function toolResult(result) {
   const { content, ...metadata } = result;
-  return { content: content || '(no output)', metadata };
+  const status = Number.isInteger(result.exit_code) ? '\n[exit_code: ' + result.exit_code + ']' : '';
+  return { content: (content || '(no output)') + status, metadata };
 }
 function source(tool) {
   return { type: 'tool', messageID: tool.messageID, id: tool.id };

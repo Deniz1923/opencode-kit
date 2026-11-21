@@ -14,6 +14,7 @@ const help = `OpenCode kit (Linux x86-64; OpenCode 2.1.3, bwrap 0.13.1)
   opencode-kit init                         Interactive setup
   opencode-kit init --sandbox --agents deniz --workflow --apply
   opencode-kit init --usage --apply
+  opencode-kit init --ponytail --apply
   opencode-kit add agents PATH|github:OWNER/REPO#REF --apply
   opencode-kit list
   opencode-kit update [COMPONENT] --apply
@@ -27,6 +28,7 @@ Options:
   --namespace NAME   Namespace for an added pack
   --workflow         Include optional todo/delegation preferences
   --usage            Include the metadata-only /usage-live dashboard (OpenCode 2.2.4)
+  --ponytail         Include optional Ponytail 5.3.3 text skills (no hooks)
   --profile ID=ROLE  read-only, planner, or workspace-write (repeatable)
   --escape ID=VALUE  ask or deny (repeatable; explicit denials remain)
   --planning-root P  Relative folder writable by planners (repeatable)
@@ -43,7 +45,7 @@ agent packs are executed. Existing executable plugins remain your responsibility
 function parse(argv) {
   const options = { agents: [], profile: [], escape: [], planningRoot: [], positional: [] };
   const values = { '--agents': 'agents', '--namespace': 'namespace', '--profile': 'profile', '--escape': 'escape', '--planning-root': 'planningRoot', '--scratch': 'scratch', '--resolve': 'resolve' };
-  const flags = { '--sandbox': 'sandbox', '--workflow': 'workflow', '--usage':'usage', '--apply': 'apply', '--dry-run': 'dryRun', '--restart': 'restart', '--interactive': 'interactive', '--full': 'full', '--help': 'help', '-h': 'help' };
+  const flags = { '--sandbox': 'sandbox', '--workflow': 'workflow', '--usage':'usage', '--ponytail': 'ponytail', '--apply': 'apply', '--dry-run': 'dryRun', '--restart': 'restart', '--interactive': 'interactive', '--full': 'full', '--help': 'help', '-h': 'help' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (values[arg]) {
@@ -97,14 +99,15 @@ export async function main(argv = process.argv.slice(2)) {
   let prompts;
   try {
     const selection = { packs: [] };
-    if (command === 'init' && !o.sandbox && !o.agents.length && !o.workflow && !o.usage) {
-      if (!interactive) throw new Error('Select --sandbox, --agents SOURCE, --workflow or --usage; run init in a terminal for the menu');
+    if (command === 'init' && !o.sandbox && !o.agents.length && !o.workflow && !o.usage && !o.ponytail) {
+      if (!interactive) throw new Error('Select --sandbox, --agents SOURCE, --workflow, --usage or --ponytail; run init in a terminal for the menu');
       prompts = promptSession();
-      const answer = await prompts.ask('Choose components:\n1. Sandbox + Deniz agents + workflow + usage (recommended)\n2. Sandbox only\n3. Deniz agents only\n4. Usage dashboard only\n5. Cancel');
+      const answer = await prompts.ask('Choose components:\n1. Sandbox + Deniz agents + workflow + usage (recommended)\n2. Sandbox only\n3. Deniz agents only\n4. Usage dashboard only\n5. Cancel\n6. Ponytail skills only');
       if (answer === '1') { o.sandbox = true; o.agents.push('deniz'); o.workflow = true; o.usage=true; }
       else if (answer === '2') o.sandbox = true;
       else if (answer === '3') o.agents.push('deniz');
       else if(answer==='4')o.usage=true;
+      else if(answer==='6')o.ponytail=true;
       else { console.log('Cancelled'); return; }
     }
     if (command === 'add') {
@@ -113,6 +116,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     if (o.sandbox) selection.sandbox = true; if (o.workflow) selection.workflow = true; if (o.scratch) selection.scratchRoot = path.resolve(o.scratch);
     if(o.usage)selection.usage=true;
+    if(o.ponytail)selection.ponytail=true;
     const existing = installedSelection(paths);
     if (command === 'update') {
       if (kind && !listInstalled(paths).some(c => c.id === kind)) throw new Error('Component is not installed: ' + kind);

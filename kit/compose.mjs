@@ -90,6 +90,15 @@ export function compose(text, selection, resolutions = {}) {
     installed.push({ id: 'workflow:deniz', name: 'Deniz workflow' }); contributions.push({ id: 'workflow:deniz', before, after: structuredClone(config) });
   }
   let policy;
+  if (selection.ponytail) {
+    const before = structuredClone(config);
+    if (config.skills !== undefined && !Array.isArray(config.skills)) throw new Error('Ponytail requires the OpenCode V2 skills array; existing settings were not changed');
+    const target = selection.pluginPath + '/integrations/ponytail/skills';
+    config.skills = [...(config.skills ?? [])];
+    if (!config.skills.includes(target)) config.skills.push(target);
+    installed.push({ id: 'ponytail', name: 'Ponytail skills', version: '5.3.3' });
+    contributions.push({ id: 'ponytail', before, after: structuredClone(config) });
+  }
   if(selection.usage){
     const before=structuredClone(config), target=selection.pluginPath+'/integrations/usage';
     const spec=p=>typeof p==='string'?p:p.package;

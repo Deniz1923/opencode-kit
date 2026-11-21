@@ -29,6 +29,25 @@ test('workspace and scratch writes work, external and symlink writes fail', asyn
   assert.ok(fs.existsSync(path.join(r.scratch, 'tmp/probe')));
 });
 
+test('workspace protection scans each directory once without skipping dependencies', async t => {
+  const o = fixture(t);
+  const nested = path.join(o.workspace, 'node_modules/pkg');
+  fs.mkdirSync(nested, {recursive: true});
+  fs.writeFileSync(path.join(nested, 'opencode.json'), '{}');
+  const original = fs.readdirSync, counts = new Map();
+  fs.readdirSync = function(file, ...args) {
+    if (String(file).startsWith(o.workspace)) counts.set(String(file), (counts.get(String(file)) ?? 0) + 1);
+    return original.call(this, file, ...args);
+  };
+  let result;
+  try { result = await runSandbox({...o, command: '! touch node_modules/pkg/opencode.jsonc; printf done'}); }
+  finally { fs.readdirSync = original; }
+  assert.equal(result.exit_code, 0, result.content);
+  assert.equal(counts.get(nested), 1);
+  assert.ok([...counts.values()].every(n => n === 1), JSON.stringify([...counts]));
+  assert.ok(!fs.existsSync(path.join(nested, 'opencode.jsonc')));
+});
+
 test('requested workdir cannot expand the trusted workspace', async t => {
   const o = fixture(t);
   await assert.rejects(runSandbox({ ...o, cwd: o.home, command: 'touch marker' }), /outside.*workspace/i);
@@ -188,11 +207,22 @@ test('nested Git metadata stays read-only inside writable planning roots', async
   assert.notEqual(r.exit_code, 0, r.content);
 });
 
-test('output is bounded and timed-out commands cannot create delayed files', async t => {
+test('shell output keeps the opening and final diagnostic at both output limits', async () => {
+  for (const noise of ["head -c 200000 /dev/zero | tr '\\0' x", 'yes x | head -n 5000']) {
+    const r = await runProcess('/bin/bash', ['-c',
+      "printf 'BUILD STARTED\\n'; " + noise + "; printf '\\nFINAL FAILURE\\n' >&2; exit 7"]);
+    assert.equal(r.exit_code, 7);
+    assert.equal(r.truncated, true);
+    assert.match(r.content, /^BUILD STARTED\n[\s\S]*\[truncated\][\s\S]*FINAL FAILURE\n$/);
+    assert.ok(Buffer.byteLength(r.content) < 52000);
+    assert.ok(r.content.split('\n').length <= 2000);
+  }
+  const small = await runProcess('/bin/bash', ['-c', 'printf hello']);
+  assert.deepEqual(small, {content: 'hello', exit_code: 0, truncated: false});
+});
+
+test('timed-out commands cannot create delayed files', async t => {
   const o = fixture(t);
-  const r = await runProcess('/bin/bash', ['-c', 'yes x | head -c 200000'], { cwd: o.workspace, timeout: 2000 });
-  assert.ok(Buffer.byteLength(r.content) < 52000);
-  assert.equal(r.truncated, true);
   const killed = await runSandbox({ ...o, timeout: 150, command: '(sleep 1; touch delayed) & wait' });
   assert.equal(killed.exit_code, 124);
   await new Promise(resolve => setTimeout(resolve, 1100));

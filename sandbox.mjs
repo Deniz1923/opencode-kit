@@ -53,11 +53,24 @@ export function runProcess(file, args, { cwd, env = process.env, timeout = 12000
   if (signal?.aborted) return Promise.resolve({ content: '[cancelled]', exit_code: 130, truncated: false });
   return new Promise((resolve, reject) => {
     const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe', ...(extraFD === undefined ? [] : [extraFD]), ...extraFDs] });
-    const chunks = []; let size = 0; let truncated = false; let forced;
+    const head = Buffer.allocUnsafe(10 * 1024);
+    const tail = Buffer.allocUnsafe(40 * 1024);
+    let headSize = 0, tailSize = 0, tailOffset = 0, byteTruncated = false, forced;
     const capture = chunk => {
-      const remaining = 50 * 1024 - size;
-      if (chunk.length > remaining) truncated = true;
-      if (remaining > 0) { const piece = chunk.subarray(0, remaining); chunks.push(piece); size += piece.length; }
+      const opening = chunk.copy(head, headSize);
+      headSize += opening;
+      const rest = chunk.subarray(opening);
+      if (rest.length === 0) return;
+      byteTruncated ||= tailSize + rest.length > tail.length;
+      tailSize = Math.min(tailSize + rest.length, tail.length);
+      if (rest.length >= tail.length) {
+        rest.copy(tail, 0, rest.length - tail.length);
+        tailOffset = 0;
+      } else {
+        const copied = rest.copy(tail, tailOffset);
+        if (copied < rest.length) rest.copy(tail, 0, copied);
+        tailOffset = (tailOffset + rest.length) % tail.length;
+      }
     };
     child.stdout.on('data', capture); child.stderr.on('data', capture);
     const kill = code => {
@@ -71,10 +84,19 @@ export function runProcess(file, args, { cwd, env = process.env, timeout = 12000
     child.once('error', error => { cleanup(); reject(error); });
     child.once('close', code => {
       cleanup();
-      let content = Buffer.concat(chunks).toString('utf8');
-      const lines = content.split('\n');
-      if (lines.length > 2000) { content = lines.slice(0, 2000).join('\n'); truncated = true; }
-      if (truncated) content += '\n[truncated]';
+      const opening = head.subarray(0, headSize);
+      const ending = byteTruncated
+        ? Buffer.concat([tail.subarray(tailOffset), tail.subarray(0, tailOffset)])
+        : tail.subarray(0, tailSize);
+      const lines = byteTruncated ? null : Buffer.concat([opening, ending]).toString('utf8').split('\n');
+      const truncated = byteTruncated || lines.length > 2000;
+      let content = truncated
+        ? [
+            ...(lines ?? opening.toString('utf8').split('\n')).slice(0, 400),
+            '[truncated]',
+            ...(lines ?? ending.toString('utf8').split('\n')).slice(-1599),
+          ].join('\n')
+        : lines.join('\n');
       if (forced === 124) content += '\n[timeout: process group terminated]';
       if (forced === 130) content += '\n[cancelled]';
       resolve({ content, exit_code: forced ?? code ?? 128, truncated });
@@ -121,15 +143,28 @@ function gitMounts(directory, mounts) {
     if (fs.existsSync(common)) mounts.add(fs.realpathSync(path.resolve(target, fs.readFileSync(common, 'utf8').trim())));
   }
 }
-function gitTreeMounts(directory, mounts) {
+function gitTreeMounts(directory, mounts, preparation) {
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  if (preparation && (directory === preparation.workspace || directory === preparation.cwd || entries.some(e => RESERVED.has(e.name)))) {
+    for (const [name, kind] of RESERVED) {
+      if (name === '.git' && directory !== preparation.workspace) continue;
+      const file = path.join(directory, name);
+      try {
+        if (kind === 'dir') fs.mkdirSync(file, { mode: 0o555 });
+        else fs.writeFileSync(file, '{}\n', { flag: 'wx', mode: 0o444 });
+        const stat = fs.lstatSync(file);
+        preparation.placeholders.push({ file, kind, ino: stat.ino, dev: stat.dev });
+      } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    }
+  }
   gitMounts(directory, mounts);
   for (const name of RESERVED.keys()) {
     const file = path.join(directory, name);
     try { if (fs.lstatSync(file).isSymbolicLink()) throw unavailable('symlinked reserved configuration path: '+file); mounts.add(file); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
   }
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isDirectory() && !['.git', '.opencode', '.agents', '.claude'].includes(entry.name)) gitTreeMounts(path.join(directory, entry.name), mounts);
+  for (const entry of entries) {
+    if (entry.isDirectory() && !RESERVED.has(entry.name)) gitTreeMounts(path.join(directory, entry.name), mounts, preparation);
   }
 }
 
@@ -170,27 +205,6 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
   let filterFD;
   const narrowFDs = [];
   try {
-    if (writable) {
-      const directories = new Set([workspace, cwd]);
-      // Protect missing siblings beside existing nested configuration too.
-      const visit = dir => {
-        const entries = fs.readdirSync(dir, {withFileTypes:true});
-        if (entries.some(e=>RESERVED.has(e.name))) directories.add(dir);
-        for (const e of entries) if (e.isDirectory() && !RESERVED.has(e.name)) visit(path.join(dir,e.name));
-      };
-      visit(workspace);
-      for (const directory of directories) for (const [name, kind] of RESERVED) {
-        if (name === '.git' && directory !== workspace) continue;
-        const file = path.join(directory, name);
-        try {
-          if (kind === 'dir') fs.mkdirSync(file, { mode: 0o555 });
-          else fs.writeFileSync(file, '{}\n', { flag: 'wx', mode: 0o444 });
-          const stat = fs.lstatSync(file);
-          placeholders.push({ file, kind, ino: stat.ino, dev: stat.dev });
-        } catch (e) { if (e.code !== 'EEXIST') throw e; }
-        if (fs.lstatSync(file).isSymbolicLink()) throw unavailable('symlinked reserved configuration path: ' + name);
-      }
-    }
     const args = ['--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
       '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/run', '--tmpfs', '/tmp', '--tmpfs', '/dev/shm'];
     if (!SPECIAL_ROOTS.has(workspace)) args.push(writable ? '--bind' : '--ro-bind', workspace, workspace);
@@ -200,7 +214,7 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
     if (writable) {
       for (const name of RESERVED.keys()) protectedPaths.add(path.join(workspace, name));
       // Existing nested repositories must not expose writable Git metadata.
-      gitTreeMounts(workspace, protectedPaths);
+      gitTreeMounts(workspace, protectedPaths, {workspace, cwd, placeholders});
       for (const p of placeholders) protectedPaths.add(p.file);
     }
     for (const value of [INSTALL_DIR, policyPaths(home,env).cacheDir, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {

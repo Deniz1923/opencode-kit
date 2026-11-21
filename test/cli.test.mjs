@@ -42,6 +42,18 @@ test('interactive menu accepts option-based component and apply choices', t => {
   assert.ok(fs.existsSync(home + '/.config/opencode/opencode.json'), r.stdout);
 });
 
+test('Ponytail-only CLI supports preview, apply, list, update and removal',t=>{
+ const {home,run}=fixture(t);
+ let r=run('init','--ponytail','--dry-run');assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/ponytail/);
+ assert.equal(fs.existsSync(home+'/.config/opencode/opencode.json'),false);
+ r=run('init','--ponytail','--apply');assert.equal(r.status,0,r.stderr);
+ assert.match(run('list').stdout,/ponytail 5.3.3/);
+ assert.match(run('doctor').stdout,/PASS Ponytail skills/);
+ r=run('update','ponytail','--apply');assert.equal(r.status,0,r.stderr);
+ r=run('remove','ponytail','--apply');assert.equal(r.status,0,r.stderr);
+ assert.equal(run('list').stdout.trim(),'No kit components installed');
+});
+
 test('usage-only CLI supports preview, apply, doctor, update and removal without bubblewrap',t=>{
  const {home,env,run}=fixture(t);const bin=home+'/bin';fs.mkdirSync(bin);
  fs.writeFileSync(bin+'/opencode','#!/bin/sh\necho "opencode v2.2.4"\n',{mode:0o700});env.PATH=bin+':'+env.PATH;

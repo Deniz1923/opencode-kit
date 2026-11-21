@@ -108,13 +108,13 @@ class AgentIntegration(unittest.TestCase):
         self.assertEqual(response.returncode, 0, self.host.last)
         return json.loads(response.stdout) if response.stdout else None
 
-    def begin(self):
+    def begin(self, text='Execute the configured test tool now.'):
         self.api('config.get')
         plugins = self.api('plugin.list')
         (ARTIFACTS / 'loaded-plugins.json').write_text(json.dumps(plugins, indent=2))
         result = self.api('session.create', {'location': {'directory': str(self.project)}})
         sid = result['data']['id']
-        self.api(f'/api/session/{sid}/prompt', {'text': 'Execute the configured test tool now.'})
+        self.api(f'/api/session/{sid}/prompt', {'text': text})
         return sid
 
     def finish(self, sid, *, decision=None, after_count=0):
@@ -124,7 +124,8 @@ class AgentIntegration(unittest.TestCase):
                 pending = self.api(f'/api/session/{sid}/permission')
                 for request in pending.get('data', []):
                     observed.append(request)
-                    self.api(f'/api/session/{sid}/permission/{request["id"]}/reply', {'decision': decision})
+                    reply = decision(request) if callable(decision) else decision
+                    self.api(f'/api/session/{sid}/permission/{request["id"]}/reply', {'decision': reply})
             context = self.api(f'/api/session/{sid}/context')
             text = json.dumps(context)
             terminal = any(m.get('type') == 'assistant' and m.get('finish') in ('stop', 'error') for m in context.get('data', [])[after_count:])
@@ -144,6 +145,24 @@ class AgentIntegration(unittest.TestCase):
         self.assertTrue((self.project / 'okay').exists(), json.dumps(context)[-4000:])
         self.assertIn('sandbox-result', json.dumps(context))
         self.assertIn('exit_code', json.dumps(context))
+
+    def test_shell_exit_code_is_sent_to_the_model(self):
+        self.config(); self.model.command = 'exit 7'
+        self.finish(self.begin())
+        results = [message for request in self.model.requests for message in request.get('messages', [])
+                   if message.get('role') == 'tool']
+        self.assertTrue(results)
+        self.assertIn('[exit_code: 7]', json.dumps(results))
+
+    def test_noisy_shell_failure_reaches_the_model(self):
+        self.config()
+        self.model.command = "printf 'BUILD STARTED\\n'; head -c 70000 /dev/zero | tr '\\0' x; printf '\\nFINAL FAILURE\\n' >&2; exit 7"
+        self.finish(self.begin())
+        results = [message.get('content') for request in self.model.requests for message in request.get('messages', [])
+                   if message.get('role') == 'tool']
+        self.assertTrue(any(all(marker in str(result) for marker in
+                                ('BUILD STARTED', '[truncated]', 'FINAL FAILURE', '[exit_code: 7]'))
+                            for result in results))
 
     def test_usage_plugin_records_live_metadata_without_extra_requests(self):
         self.model.report_usage=True
@@ -238,6 +257,49 @@ class AgentIntegration(unittest.TestCase):
         self.assertFalse(any(p.get('id') == 'local.goal-mode.server' for p in plugins))
         commands = self.api('/api/command')['data']
         self.assertTrue(any(c.get('name') == 'goal' for c in commands))
+
+    def test_ponytail_skills_register_without_injection_and_load_explicitly_with_superpowers(self):
+        self.config(existing_plugins=[str(ROOT / 'integrations/superpowers')])
+        target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
+        config['skills'] = [str(ROOT / 'integrations/ponytail/skills')]
+        config['agents']['build']['system'] = 'Use a workflow proportional to the task.\nExecute the requested tool.'
+        target.write_text(json.dumps(config))
+        self.model.tool = 'skill'; self.model.arguments = {'id': 'ponytail'}
+        context, _ = self.finish(self.begin('Load the ponytail skill explicitly for this task.'))
+        self.assertIn('You are a lazy senior developer.', json.dumps(context))
+        requests = [r for r in self.model.requests if r.get('tools')]
+        self.assertNotIn('You are a lazy senior developer.', json.dumps(requests[0]))
+        skills = self.api('/api/skill')['data']
+        by_id = {s['id']: s for s in skills}
+        self.assertFalse(by_id['ponytail']['autoinvoke'])
+        self.assertIn('ponytail-review', by_id)
+        self.assertIn('ponytail-audit', by_id)
+        self.assertIn('writing-plans', by_id)
+
+    def test_ponytail_skills_respect_chat_denial(self):
+        self.config(agent='chat', source_permissions=[{'action': 'skill', 'resource': '*', 'effect': 'deny'}])
+        target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
+        config['skills'] = [str(ROOT / 'integrations/ponytail/skills')]
+        target.write_text(json.dumps(config))
+        self.model.tool = 'skill'; self.model.arguments = {'id': 'ponytail-audit'}
+        context, _ = self.finish(self.begin('Load ponytail-audit.'))
+        requests = [r for r in self.model.requests if r.get('tools')]
+        self.assertTrue(requests)
+        self.assertTrue(all(t['function']['name'] != 'skill' for r in requests for t in r['tools']))
+        self.assertNotIn('Audit the whole repo like', json.dumps(context))
+
+    def test_ponytail_review_and_audit_load_without_a_plugin(self):
+        self.config(plugin=False)
+        target = self.host.config / 'opencode.json'; config = json.loads(target.read_text())
+        config['skills'] = [str(ROOT / 'integrations/ponytail/skills')]
+        target.write_text(json.dumps(config))
+        self.model.tool = 'skill'
+        for skill, expected in [('ponytail-review', 'Review a change like the senior developer'),
+                                ('ponytail-audit', 'Audit the whole repo like the senior developer')]:
+            with self.subTest(skill=skill):
+                self.model.arguments = {'id': skill}
+                context, _ = self.finish(self.begin('Load the ' + skill + ' skill.'))
+                self.assertIn(expected, json.dumps(context))
 
     def test_proportional_build_receives_its_policy_and_can_explicitly_load_skills(self):
         self.config(existing_plugins=[str(ROOT / 'integrations/superpowers')])
@@ -381,11 +443,18 @@ class AgentIntegration(unittest.TestCase):
     def test_code_mode_session_move_cannot_grant_sandbox_write_access(self):
         self.config()
         second = self.root / 'unapproved-project'; second.mkdir()
+
+        def approve_move(request):
+            # OpenCode 2.3.0 asks for the move itself before reaching the write check.
+            self.assertEqual(request['action'], 'external_directory')
+            self.assertEqual(request['resources'], [str(second) + '/*'])
+            return 'once'
+
         self.model.steps = [
             {'tool': 'execute', 'arguments': {'code': 'return await tools.opencode.session_move({directory:' + json.dumps(str(second)) + '});'}},
             {'tool': 'sandbox_shell', 'arguments': {'command': 'touch code-mode-escape'}},
         ]
-        sid = self.begin(); context, _ = self.finish(sid)
+        sid = self.begin(); context, _ = self.finish(sid, decision=approve_move)
         self.assertEqual(self.api('/api/session/' + sid)['data']['location']['directory'], str(second))
         self.assertFalse((second / 'code-mode-escape').exists(), json.dumps(context)[-3000:])
         self.assertIn('approved workspaces', json.dumps(context))

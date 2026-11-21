@@ -54,6 +54,41 @@ Existing executable plugins are preserved; agent packs cannot install plugins.
 Deniz's Build prompt uses todos, so its pack visibly declares the todo dependency.
 Keeping an existing disabled todo setting skips the dependent pack.
 
+## Coding evaluations
+
+[Six disposable coding tasks](evals/README.md) check bug fixes, API migrations,
+build diagnosis, multi-step completion, review accuracy, and compaction recovery.
+Preparation and checking use no model quota; real-model runs are explicit.
+
+## Optional Ponytail skills
+
+Ponytail is independent of the sandbox, agent packs, usage dashboard and
+Superpowers. Install it alone or add `--ponytail` to a combined setup:
+
+```sh
+node cli.mjs init --ponytail --dry-run
+node cli.mjs init --ponytail --apply
+node cli.mjs update ponytail --apply
+node cli.mjs remove ponytail --apply
+```
+
+Existing components retain their documented OpenCode version checks. This
+component adds only a native `skills` source and never edits agent prompts or
+grants skill permissions. Any author's agents can use it if their existing
+permissions allow skills; restricted Deniz Chat stays restricted.
+
+- `@ponytail`: explicitly load minimal-solution guidance; not advertised to the
+  model automatically. Ask for lite, full, or ultra as needed.
+- `@ponytail-review`: review a change without editing it.
+- `@ponytail-audit`: audit a repository without editing it.
+
+These are native skill mentions, not installed slash commands. Only skill names
+and descriptions are advertised before loading; skill bodies are not injected
+into every request. No upstream executable plugin, hooks, task board or telemetry
+is installed. Version **5.3.3** is bundled under MIT; see the preserved
+[license](integrations/ponytail/LICENSE) and
+[provenance](integrations/ponytail/PROVENANCE.json).
+
 ## Profiles
 
 | Profile | Project writes | Scratch | Host escape |
@@ -80,6 +115,8 @@ writer for Build/General/Chat, planner for Plan, reader for review/exploration.
 The test engineer may request an approved host escape.
 
 Each session records its initial workspace independently of its current location.
+On OpenCode 2.3.0, moving through Code Mode can prompt for access to the
+destination directory. Approve that request to complete the move.
 Moving a session, including through Code Mode, does not authorize another writable
 directory. The agent uses `workspace_approve` to request approval for an exact
 additional directory. Rejection grants nothing; approval lasts for that session
@@ -254,6 +291,11 @@ See [usage dashboard](docs/usage-dashboard.md) for controls, installation option
 and the observation window. Your existing `/usage` and `/stats` remain available.
 
 ## Security scope
+
+Routine `webfetch` and `websearch` research is allowed without approval prompts.
+Existing explicit denials remain enforced. This does not grant permission to post,
+upload private information, or change external accounts and services, and does not
+enable network access inside the shell sandbox.
 
 The plugin-owned `sandbox_shell` runs commands inside bwrap. The built-in agent
 `shell` is hard-denied. Missing/failed plugins leave it blocked. OpenCode 2.1.3
