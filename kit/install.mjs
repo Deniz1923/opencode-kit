@@ -98,7 +98,7 @@ function codeFiles(paths) {
   include('integrations/superpowers');
   include('integrations/usage');
   include('integrations/ponytail');
-  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.3.0', private: true }), 0o600]);
+  content.push(['package.json', json({ name: 'opencode-workspace-sandbox', type: 'module', version: '0.3.1', private: true }), 0o600]);
   const hash = digest(json(content)); const directory = path.join(paths.store, 'versions', hash.slice(0, 20));
   return { directory, hash, files: content.map(([name, after, mode]) => ({ path: path.join(directory, name), after, mode })) };
 }

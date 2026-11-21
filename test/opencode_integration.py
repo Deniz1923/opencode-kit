@@ -158,7 +158,7 @@ class AgentIntegration(unittest.TestCase):
         self.finish(self.begin())
         schemas = [item['function']['name'] for request in self.model.requests for item in request.get('tools', [])]
         self.assertIn('read', schemas)
-        self.assertFalse({'shell', 'execute', 'subagent'} & set(schemas), schemas)
+        self.assertFalse({'shell', 'execute', 'subagent', 'opencode_worktree_create'} & set(schemas), schemas)
         self.assertFalse(marker.exists())
 
     def test_sandbox_tool_runs_through_real_opencode(self):

@@ -27,7 +27,7 @@ Install the supported OpenCode/bwrap/Node/Git versions listed in the README, the
 clone the public repository:
 
 ```sh
-git clone --branch v0.3.0 https://github.com/Deniz1923/opencode-kit.git
+git clone --branch v0.3.1 https://github.com/Deniz1923/opencode-kit.git
 cd opencode-kit
 npm ci --ignore-scripts
 node cli.mjs init

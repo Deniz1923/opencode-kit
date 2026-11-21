@@ -19,7 +19,7 @@ removal and transaction recovery remain available after an OpenCode upgrade.
 Clone the repository:
 
 ```sh
-git clone --branch v0.3.0 https://github.com/Deniz1923/opencode-kit.git
+git clone --branch v0.3.1 https://github.com/Deniz1923/opencode-kit.git
 cd opencode-kit
 npm ci --ignore-scripts
 node cli.mjs init
@@ -52,8 +52,9 @@ node cli.mjs remove sandbox --apply
 Restart OpenCode after applying, or explicitly append `--restart`.
 Sandbox-only keeps your prompts. In agents-only mode, Deniz Plan, Explore,
 Reviewer, Debugger and Test Engineer can inspect files. The kit denies edits,
-terminal commands, Code Mode and delegation for those roles until the sandbox
-is installed. Run tests from Build in agents-only mode.
+terminal commands, Code Mode, delegation and worktree creation for those
+roles in agents-only mode. Run tests from Build in that mode. These are
+OpenCode permissions. Install the sandbox for OS-level shell isolation.
 Existing executable plugins are preserved; agent packs cannot install plugins.
 Deniz's Build prompt uses todos, so its pack visibly declares the todo dependency.
 Keeping an existing disabled todo setting skips the dependent pack.

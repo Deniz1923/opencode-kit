@@ -20,7 +20,7 @@ test('dry-run changes no config; selected agent pack installs, lists, updates an
   let config = JSON.parse(fs.readFileSync(home + '/.config/opencode/opencode.json'));
   assert.ok(config.agents['deniz/build']); assert.equal(config.experimental.todo, true); assert.ok(!config.plugins);
   for (const id of ['plan', 'explore', 'code-reviewer', 'debugger', 'test-engineer']) {
-    for (const action of ['edit', 'shell', 'execute', 'subagent']) {
+    for (const action of ['edit', 'shell', 'execute', 'subagent', 'opencode_worktree_create']) {
       assert.ok(config.agents['deniz/' + id].permissions.some(r => r.action === action && r.resource === '*' && r.effect === 'deny'));
     }
   }

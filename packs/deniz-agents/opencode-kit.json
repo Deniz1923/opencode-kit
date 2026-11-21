@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "name": "Deniz agents",
   "namespace": "deniz",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "agents": [
     {
       "file": "agents/build.md",
