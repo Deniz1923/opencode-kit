@@ -122,7 +122,7 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         if (event.action === 'external_directory') {
           const targets = (event.resources ?? []).map(r => canonicalTarget(r.endsWith('/*') ? r.slice(0,-2) : r));
           if (targets.length && targets.every(target => !sensitive.some(p=>inside(target,p))
-            && (isNativeTemp(target) || scope.roots.some(root=>inside(target,root))))) event.effect = 'allow';
+            && (inside(target, '/tmp') || scope.roots.some(root=>inside(target,root))))) event.effect = 'allow';
         } else if (['read', 'grep', 'glob'].includes(event.action)) {
           const search = event.action !== 'read';
           const targets = search ? [canonicalTarget(path.resolve(scope.directory, event.metadata?.path ?? '.'))]

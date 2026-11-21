@@ -344,11 +344,11 @@ test('session-approved directory boundaries stop asking without overriding denia
     const e = {action:'external_directory', resources:[second+'/*'], effect:initial, agent:'build', sessionID:'ses_test'};
     await h.hooks.get('evaluate')(e); assert.equal(e.effect, initial === 'deny' ? 'deny' : 'allow');
   }
-  const e = {action:'external_directory', resources:[h.root+'/*'], effect:'ask', agent:'build', sessionID:'ses_test'};
+  const e = {action:'external_directory', resources:['/var/tmp/*'], effect:'ask', agent:'build', sessionID:'ses_test'};
   await h.hooks.get('evaluate')(e); assert.equal(e.effect, 'ask');
 });
 
-test('native OpenCode temp access preserves directory, profile, and protected-file boundaries', async t => {
+test('native temp reads skip directory approval and preserve write boundaries', async t => {
   const h = host(t, {nativeTemp:true}); await h.plugin.setup(h.ctx);
   fs.mkdirSync(h.nativeTempRoot, {mode:0o700});
   const evaluate = async (action, resource, agent = 'build', effect = 'ask') => {
@@ -359,12 +359,15 @@ test('native OpenCode temp access preserves directory, profile, and protected-fi
   const folder = h.nativeTempRoot + '/generated';
   assert.equal(await evaluate('external_directory', folder + '/*'), 'allow');
   assert.equal(await evaluate('external_directory', folder + '/*', 'build', 'deny'), 'deny');
-  assert.equal(await evaluate('external_directory', h.root + '/*'), 'ask');
+  assert.equal(await evaluate('external_directory', '/tmp/*'), 'allow');
+  assert.equal(await evaluate('external_directory', h.root + '/*'), 'allow');
+  assert.equal(await evaluate('external_directory', '/var/tmp/*'), 'ask');
+  assert.equal(await evaluate('edit', h.root + '/output.txt', 'build', 'allow'), 'deny');
   assert.equal(await evaluate('edit', folder + '/output.txt', 'build', 'allow'), 'allow');
   assert.equal(await evaluate('edit', folder + '/output.txt', 'explore', 'allow'), 'deny');
   assert.equal(await evaluate('edit', folder + '/opencode.json', 'build', 'allow'), 'deny');
   fs.chmodSync(h.nativeTempRoot, 0o777);
-  assert.equal(await evaluate('external_directory', folder + '/*'), 'ask');
+  assert.equal(await evaluate('edit', folder + '/output.txt', 'build', 'allow'), 'deny');
 });
 
 test('ordinary shell has no approval reason field and restriction failures explain the approval route', async t => {

@@ -93,9 +93,9 @@ Approval records contain only session IDs and directory paths in the private
 not contain conversation text. Workspace approval does not authorize network
 access or unsandboxed execution.
 
-Native tools can read under host `/tmp/opencode` without an additional directory
-approval when that directory is owned by the OpenCode user and writable only
-by that user. Workspace-write agents can also edit ordinary files there.
+Native tools can read under host `/tmp` without an additional directory approval.
+Workspace-write agents can also edit ordinary files under `/tmp/opencode` when
+that directory belongs to the OpenCode user and other users cannot write to it.
 Existing file denials, agent profiles, and project scratch write rules still
 apply. Shell commands continue to use their isolated `/tmp`.
 
