@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { planningRoot, privatePaths, policyPaths } from './policy.mjs';
@@ -10,7 +10,17 @@ export const INSTALL_DIR = path.dirname(fileURLToPath(import.meta.url));
 const SPECIAL_ROOTS = new Set(['/', '/tmp', '/run', '/dev/shm', '/dev', '/proc', '/sys']);
 const RESERVED = new Map([['opencode.json', 'file'], ['opencode.jsonc', 'file'],
   ['.mcp.json', 'file'], ['.opencode', 'dir'], ['.agents', 'dir'], ['.claude', 'dir'], ['.git', 'dir']]);
-const queues = new Map();
+const HEAD_BYTES = 10 * 1024;
+const TAIL_BYTES = 40 * 1024;
+const MAX_INLINE_LINES = 2000;
+const MAX_LOG_BYTES = 10 * 1024 * 1024;
+const RECENT_TAIL_BYTES = 4 * 1024;
+const SAFE_ENV = new Set([
+  'PATH', 'USER', 'LOGNAME', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'LANG', 'TZ',
+  'VIRTUAL_ENV', 'RUSTUP_HOME', 'CARGO_HOME', 'GOPATH', 'NVM_DIR', 'FNM_DIR',
+  'PYENV_ROOT', 'BUN_INSTALL', 'DENO_DIR', 'JAVA_HOME', 'DOTNET_ROOT',
+]);
+
 export function inside(child, parent) {
   const rel = path.relative(parent, child);
   return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
@@ -21,6 +31,14 @@ function realDir(value) {
   const real = fs.realpathSync(value);
   if (!fs.statSync(real).isDirectory()) throw unavailable('workspace is not a directory');
   return real;
+}
+export function workspaceHash(workspace) {
+  return createHash('sha256').update(realDir(workspace)).digest('hex').slice(0, 16);
+}
+function isSafeOwnedDir(dir) {
+  if (!dir || !path.isAbsolute(dir) || /[\r\n\0]/.test(dir)) return false;
+  const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  return Boolean(stat?.isDirectory() && !stat.isSymbolicLink() && stat.uid === process.getuid() && !(stat.mode & 0o022));
 }
 function privateDir(dir) {
   if (!path.isAbsolute(dir)) throw unavailable('scratch directory must be absolute');
@@ -37,50 +55,270 @@ function privateDir(dir) {
 }
 function cleanEnvironment(source, home, scratch) {
   const out = {};
-  const names = new Set(['PATH', 'USER', 'LOGNAME', 'TERM', 'COLORTERM', 'NO_COLOR', 'FORCE_COLOR', 'LANG', 'TZ']);
   for (const [name, value] of Object.entries(source)) {
-    if ((names.has(name) || name.startsWith('LC_')) && !/(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string') out[name] = value;
+    if ((SAFE_ENV.has(name) || name.startsWith('LC_')) && !/(?:KEY|TOKEN|SECRET|PASSWORD)/i.test(name) && typeof value === 'string') out[name] = value;
   }
   return { ...out, PATH: out.PATH || '/usr/local/bin:/usr/bin:/bin', HOME: home,
     SHELL: '/bin/bash', TMPDIR: path.join(scratch, 'tmp'), XDG_RUNTIME_DIR: path.join(scratch, 'run'),
     XDG_CACHE_HOME: path.join(scratch, 'cache'), npm_config_cache: path.join(scratch, 'cache/npm'),
     PIP_CACHE_DIR: path.join(scratch, 'cache/pip'), GOCACHE: path.join(scratch, 'cache/go-build'),
-    YARN_CACHE_FOLDER: path.join(scratch, 'cache/yarn'), GIT_OPTIONAL_LOCKS: '0' };
+    YARN_CACHE_FOLDER: path.join(scratch, 'cache/yarn'),
+    PYTHONDONTWRITEBYTECODE: '1', PYTHONPYCACHEPREFIX: path.join(scratch, 'cache/pycache'),
+    RUFF_CACHE_DIR: path.join(scratch, 'cache/ruff'), MYPY_CACHE_DIR: path.join(scratch, 'cache/mypy'),
+    GIT_OPTIONAL_LOCKS: '0' };
 }
 
-export function runProcess(file, args, { cwd, env = process.env, timeout = 120000, signal, extraFD, extraFDs = [] } = {}) {
-  if (!Number.isSafeInteger(timeout) || timeout < 0) throw new Error('timeout must be a nonnegative integer');
-  if (signal?.aborted) return Promise.resolve({ content: '[cancelled]', exit_code: 130, truncated: false });
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe', ...(extraFD === undefined ? [] : [extraFD]), ...extraFDs] });
-    const head = Buffer.allocUnsafe(10 * 1024);
-    const tail = Buffer.allocUnsafe(40 * 1024);
-    let headSize = 0, tailSize = 0, tailOffset = 0, byteTruncated = false, forced;
-    const capture = chunk => {
-      const opening = chunk.copy(head, headSize);
-      headSize += opening;
-      const rest = chunk.subarray(opening);
-      if (rest.length === 0) return;
-      byteTruncated ||= tailSize + rest.length > tail.length;
-      tailSize = Math.min(tailSize + rest.length, tail.length);
-      if (rest.length >= tail.length) {
-        rest.copy(tail, 0, rest.length - tail.length);
-        tailOffset = 0;
-      } else {
-        const copied = rest.copy(tail, tailOffset);
-        if (copied < rest.length) rest.copy(tail, 0, copied);
-        tailOffset = (tailOffset + rest.length) % tail.length;
+function pidAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code !== 'ESRCH'; }
+}
+function readPrivateJson(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077) || stat.size > 4 * 1024 * 1024) return null;
+    return JSON.parse(fs.readFileSync(fd, 'utf8'));
+  } catch (e) { if (e.code === 'ENOENT') return undefined; return null; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+function readLeases(leasesFile) {
+  const data = readPrivateJson(leasesFile);
+  if (!data || data.schemaVersion !== 1 || !data.leases || typeof data.leases !== 'object') return {};
+  return data.leases;
+}
+function writeLeases(leasesFile, leases) {
+  if (!Object.keys(leases).length) { fs.rmSync(leasesFile, { force: true }); return; }
+  const tmp = leasesFile + '.tmp-' + randomUUID();
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ schemaVersion: 1, leases }) + '\n', { flag: 'wx', mode: 0o600 });
+    fs.renameSync(tmp, leasesFile);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+function removePlaceholderIfUnchanged({ file, kind, ino, dev }) {
+  try {
+    const stat = fs.lstatSync(file);
+    if (stat.ino !== ino || stat.dev !== dev) return;
+    if (kind === 'dir') fs.rmdirSync(file);
+    else if (stat.isFile() && fs.readFileSync(file, 'utf8') === '{}\n') fs.unlinkSync(file);
+  } catch { /* Preserve anything changed or replaced by another host process. */ }
+}
+function pruneDeadLeases(leases) {
+  const aliveFiles = new Set();
+  const deadPlaceholders = [];
+  for (const [id, entry] of Object.entries(leases)) {
+    if (pidAlive(entry?.pid)) {
+      for (const p of entry.placeholders ?? []) aliveFiles.add(p.file);
+    } else {
+      for (const p of entry?.placeholders ?? []) deadPlaceholders.push(p);
+      delete leases[id];
+    }
+  }
+  for (const p of deadPlaceholders.reverse()) {
+    if (!aliveFiles.has(p.file)) removePlaceholderIfUnchanged(p);
+  }
+}
+async function withCoordLock(scratchRoot, hash, fn) {
+  const lock = path.join(scratchRoot, hash + '.coord.lock');
+  const deadline = Date.now() + 5000;
+  let acquired = false;
+  while (!acquired) {
+    try {
+      const fd = fs.openSync(lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+      try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: Date.now() }) + '\n'); }
+      finally { fs.closeSync(fd); }
+      acquired = true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw unavailable('cannot acquire workspace coordination lock: ' + error.message);
+      let recovered = false;
+      try {
+        const stat = fs.lstatSync(lock);
+        if (stat.isFile() && stat.uid === process.getuid() && !(stat.mode & 0o077)) {
+          const parsed = readPrivateJson(lock);
+          if (parsed && !pidAlive(parsed.pid)) { fs.unlinkSync(lock); recovered = true; }
+          else if (!parsed && Date.now() - stat.mtimeMs > 250) { fs.unlinkSync(lock); recovered = true; }
+        }
+      } catch { /* Another process may have already released it. */ }
+      if (recovered) continue;
+      if (Date.now() >= deadline) throw unavailable('workspace coordination lock busy: ' + lock);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  try { return await fn(); }
+  finally { try { fs.unlinkSync(lock); } catch { /* ignore */ } }
+}
+
+export function activePlaceholders(workspace, scratchRoot = '/tmp/opencode/sandbox') {
+  try {
+    const hash = workspaceHash(workspace);
+    const leases = readLeases(path.join(scratchRoot, hash + '.leases.json'));
+    const out = new Set();
+    for (const entry of Object.values(leases)) {
+      if (!pidAlive(entry?.pid)) continue;
+      for (const p of entry.placeholders ?? []) out.add(p.file);
+    }
+    return [...out];
+  } catch { return []; }
+}
+
+export function inspectScratchHealth(scratchRoot = '/tmp/opencode/sandbox') {
+  if (!fs.existsSync(scratchRoot)) {
+    return { ok: true, staleLocks: 0, staleLeases: 0, activeLeases: 0, detail: 'scratch directory not yet created' };
+  }
+  const stat = fs.lstatSync(scratchRoot);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
+    return { ok: false, staleLocks: 0, staleLeases: 0, activeLeases: 0, detail: 'unsafe scratch directory ownership, mode, or symlink: ' + scratchRoot };
+  }
+  let staleLocks = 0, staleLeases = 0, activeLeases = 0;
+  for (const entry of fs.readdirSync(scratchRoot, { withFileTypes: true })) {
+    const full = path.join(scratchRoot, entry.name);
+    if (entry.name.endsWith('.coord.lock')) {
+      const data = readPrivateJson(full);
+      if (!data || !pidAlive(data.pid)) staleLocks++;
+    } else if (entry.name.endsWith('.lock')) {
+      staleLocks++;
+    } else if (entry.name.endsWith('.leases.json')) {
+      for (const lease of Object.values(readLeases(full))) {
+        if (pidAlive(lease?.pid)) activeLeases++; else staleLeases++;
       }
+    }
+  }
+  const parts = [];
+  if (activeLeases) parts.push(`${activeLeases} active lease(s)`);
+  if (staleLocks) parts.push(`${staleLocks} stale lock(s)`);
+  if (staleLeases) parts.push(`${staleLeases} stale lease(s)`);
+  const detail = parts.length
+    ? parts.join(', ') + (staleLocks || staleLeases ? ' (will self-recover on next sandbox_shell)' : '')
+    : 'clean';
+  return { ok: true, staleLocks, staleLeases, activeLeases, detail };
+}
+
+export function pruneWorkspaceLogs(logDir, activePaths = new Set(), limit = 32, keepPath = null) {
+  try {
+    const files = fs.readdirSync(logDir, { withFileTypes: true })
+      .filter(e => e.isFile() && e.name.endsWith('.log'))
+      .map(e => { const full = path.join(logDir, e.name); return { full, mtime: fs.lstatSync(full).mtimeMs }; });
+    const removable = files
+      .filter(item => !activePaths.has(item.full) && item.full !== keepPath)
+      .sort((a, b) => a.mtime - b.mtime || a.full.localeCompare(b.full));
+    const maxRemovable = Math.max(0, limit - (keepPath && files.some(f => f.full === keepPath) ? 1 : 0));
+    while (removable.length > maxRemovable) {
+      const oldest = removable.shift();
+      try { fs.unlinkSync(oldest.full); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+function countNewlines(buf) {
+  let count = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) count++;
+  return count;
+}
+
+export function spawnProcess(file, args, {
+  cwd, env = process.env, timeout = 120000, signal, extraFD, extraFDs = [],
+  logFile, spillLog, maxLogBytes = MAX_LOG_BYTES,
+} = {}) {
+  if (!Number.isSafeInteger(timeout) || timeout < 0) throw new Error('timeout must be a nonnegative integer');
+  let activeLogPath = logFile;
+  let logFD;
+  let logBytes = 0;
+  let logCapped = false;
+  const openLog = target => {
+    logFD = fs.openSync(target, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600);
+    activeLogPath = target;
+  };
+  const writeLog = buf => {
+    if (logFD === undefined || !buf.length || logCapped) return;
+    const remaining = maxLogBytes - logBytes;
+    if (remaining <= 0) {
+      logCapped = true;
+      const notice = Buffer.from('\n[log truncated at 10 MiB]\n');
+      try { fs.writeSync(logFD, notice); } catch { /* ignore */ }
+      return;
+    }
+    const slice = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+    try { fs.writeSync(logFD, slice); } catch { /* ignore */ }
+    logBytes += slice.length;
+    if (buf.length > remaining) {
+      logCapped = true;
+      const notice = Buffer.from('\n[log truncated at 10 MiB]\n');
+      try { fs.writeSync(logFD, notice); } catch { /* ignore */ }
+    }
+  };
+  if (activeLogPath) openLog(activeLogPath);
+  if (signal?.aborted) {
+    if (logFD !== undefined) { fs.closeSync(logFD); logFD = undefined; }
+    return {
+      child: null,
+      kill: () => {},
+      tail: () => '',
+      logPath: () => activeLogPath,
+      logBytes: () => logBytes,
+      done: Promise.resolve({ content: '[cancelled]', exit_code: 130, truncated: false, ...(activeLogPath ? { log_path: activeLogPath } : {}) }),
     };
-    child.stdout.on('data', capture); child.stderr.on('data', capture);
-    const kill = code => {
-      forced = code;
-      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-    };
-    const abort = () => kill(130);
-    const timer = timeout ? setTimeout(() => kill(124), timeout) : undefined;
-    signal?.addEventListener('abort', abort, { once: true });
-    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+  }
+  const child = spawn(file, args, {
+    cwd, env, detached: true,
+    stdio: ['ignore', 'pipe', 'pipe', ...(extraFD === undefined ? [] : [extraFD]), ...extraFDs],
+  });
+  const head = Buffer.allocUnsafe(HEAD_BYTES);
+  const tail = Buffer.allocUnsafe(TAIL_BYTES);
+  const recent = Buffer.allocUnsafe(RECENT_TAIL_BYTES);
+  let headSize = 0, tailSize = 0, tailOffset = 0, recentSize = 0, recentOffset = 0;
+  let lineCount = 1, byteTruncated = false, forced;
+  const appendRecent = chunk => {
+    if (chunk.length >= recent.length) {
+      chunk.copy(recent, 0, chunk.length - recent.length);
+      recentSize = recent.length; recentOffset = 0;
+    } else {
+      const copied = chunk.copy(recent, recentOffset);
+      if (copied < chunk.length) chunk.copy(recent, 0, copied);
+      recentOffset = (recentOffset + chunk.length) % recent.length;
+      recentSize = Math.min(recentSize + chunk.length, recent.length);
+    }
+  };
+  const capture = chunk => {
+    appendRecent(chunk);
+    const nextLines = lineCount + countNewlines(chunk);
+    const willByteTruncate = byteTruncated || (headSize + tailSize + chunk.length > HEAD_BYTES + TAIL_BYTES);
+    if (logFD === undefined && spillLog && (willByteTruncate || nextLines > MAX_INLINE_LINES)) {
+      try {
+        openLog(spillLog());
+        if (headSize > 0) writeLog(head.subarray(0, headSize));
+        if (tailSize > 0) writeLog(tail.subarray(0, tailSize));
+      } catch { /* Best effort; inline truncation still applies. */ }
+    }
+    if (logFD !== undefined) writeLog(chunk);
+    lineCount = nextLines;
+    const opening = chunk.copy(head, headSize);
+    headSize += opening;
+    const rest = chunk.subarray(opening);
+    if (rest.length === 0) return;
+    byteTruncated ||= tailSize + rest.length > tail.length;
+    tailSize = Math.min(tailSize + rest.length, tail.length);
+    if (rest.length >= tail.length) {
+      rest.copy(tail, 0, rest.length - tail.length);
+      tailOffset = 0;
+    } else {
+      const copied = rest.copy(tail, tailOffset);
+      if (copied < rest.length) rest.copy(tail, 0, copied);
+      tailOffset = (tailOffset + rest.length) % tail.length;
+    }
+  };
+  child.stdout.on('data', capture);
+  child.stderr.on('data', capture);
+  const kill = code => {
+    if (forced === undefined) forced = code;
+    try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* ignore */ } }
+  };
+  const abort = () => kill(130);
+  const timer = timeout ? setTimeout(() => kill(124), timeout) : undefined;
+  signal?.addEventListener('abort', abort, { once: true });
+  const closeLog = () => { if (logFD !== undefined) { try { fs.closeSync(logFD); } catch { /* ignore */ } logFD = undefined; } };
+  const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); closeLog(); };
+  const done = new Promise((resolve, reject) => {
     child.once('error', error => { cleanup(); reject(error); });
     child.once('close', code => {
       cleanup();
@@ -89,7 +327,7 @@ export function runProcess(file, args, { cwd, env = process.env, timeout = 12000
         ? Buffer.concat([tail.subarray(tailOffset), tail.subarray(0, tailOffset)])
         : tail.subarray(0, tailSize);
       const lines = byteTruncated ? null : Buffer.concat([opening, ending]).toString('utf8').split('\n');
-      const truncated = byteTruncated || lines.length > 2000;
+      const truncated = byteTruncated || lines.length > MAX_INLINE_LINES;
       let content = truncated
         ? [
             ...(lines ?? opening.toString('utf8').split('\n')).slice(0, 400),
@@ -99,9 +337,21 @@ export function runProcess(file, args, { cwd, env = process.env, timeout = 12000
         : lines.join('\n');
       if (forced === 124) content += '\n[timeout: process group terminated]';
       if (forced === 130) content += '\n[cancelled]';
-      resolve({ content, exit_code: forced ?? code ?? 128, truncated });
+      resolve({ content, exit_code: forced ?? code ?? 128, truncated, ...(activeLogPath ? { log_path: activeLogPath } : {}) });
     });
   });
+  const readRecentTail = () => {
+    if (recentSize === 0) return '';
+    const buf = recentSize < recent.length
+      ? recent.subarray(0, recentSize)
+      : Buffer.concat([recent.subarray(recentOffset), recent.subarray(0, recentOffset)]);
+    return buf.toString('utf8');
+  };
+  return { child, kill, tail: readRecentTail, logPath: () => activeLogPath, logBytes: () => logBytes, done };
+}
+
+export function runProcess(file, args, options = {}) {
+  return spawnProcess(file, args, options).done;
 }
 
 function socketFilterFD(scratchRoot) {
@@ -128,12 +378,8 @@ function socketFilterFD(scratchRoot) {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
-function gitMounts(directory, mounts) {
+function addGitWorktreeMounts(directory, meta, mounts) {
   // No host-side Git executable, hooks, or project-controlled executable is run.
-  const meta = path.join(directory, '.git');
-  if (!fs.existsSync(meta)) return;
-  if (fs.lstatSync(meta).isSymbolicLink()) throw unavailable('symlinked .git is unsupported');
-  mounts.add(meta);
   if (fs.statSync(meta).isFile()) {
     const match = /^gitdir: (.+)\s*$/.exec(fs.readFileSync(meta, 'utf8').trim());
     if (!match) throw unavailable('invalid worktree .git file');
@@ -143,33 +389,43 @@ function gitMounts(directory, mounts) {
     if (fs.existsSync(common)) mounts.add(fs.realpathSync(path.resolve(target, fs.readFileSync(common, 'utf8').trim())));
   }
 }
-function gitTreeMounts(directory, mounts, preparation) {
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
-  if (preparation && (directory === preparation.workspace || directory === preparation.cwd || entries.some(e => RESERVED.has(e.name)))) {
-    for (const [name, kind] of RESERVED) {
-      if (name === '.git' && directory !== preparation.workspace) continue;
-      const file = path.join(directory, name);
-      try {
-        if (kind === 'dir') fs.mkdirSync(file, { mode: 0o555 });
-        else fs.writeFileSync(file, '{}\n', { flag: 'wx', mode: 0o444 });
-        const stat = fs.lstatSync(file);
-        preparation.placeholders.push({ file, kind, ino: stat.ino, dev: stat.dev });
-      } catch (e) { if (e.code !== 'EEXIST') throw e; }
+
+async function scanTree(rootDir, mounts, placeholderDirs, workspace, cwd) {
+  const queue = [rootDir];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < queue.length) {
+      const directory = queue[cursor++];
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+      let hasReserved = false;
+      for (const entry of entries) {
+        if (RESERVED.has(entry.name)) {
+          hasReserved = true;
+          const file = path.join(directory, entry.name);
+          const isLink = entry.isSymbolicLink() || (!entry.isFile() && !entry.isDirectory() && (await fs.promises.lstat(file)).isSymbolicLink());
+          if (isLink) {
+            throw unavailable(entry.name === '.git' ? 'symlinked .git is unsupported' : 'symlinked reserved configuration path: ' + file);
+          }
+          mounts.add(file);
+          if (entry.name === '.git') addGitWorktreeMounts(directory, file, mounts);
+        } else if (entry.isDirectory()) {
+          queue.push(path.join(directory, entry.name));
+        }
+      }
+      if (placeholderDirs && (directory === workspace || directory === cwd || hasReserved)) {
+        placeholderDirs.add(directory);
+      }
     }
-  }
-  gitMounts(directory, mounts);
-  for (const name of RESERVED.keys()) {
-    const file = path.join(directory, name);
-    try { if (fs.lstatSync(file).isSymbolicLink()) throw unavailable('symlinked reserved configuration path: '+file); mounts.add(file); }
-    catch (e) { if (e.code !== 'ENOENT') throw e; }
-  }
-  for (const entry of entries) {
-    if (entry.isDirectory() && !RESERVED.has(entry.name)) gitTreeMounts(path.join(directory, entry.name), mounts, preparation);
-  }
+  };
+  await Promise.all(Array.from({ length: 16 }, worker));
 }
 
-async function executeSandbox({ workspace, cwd, command, home = os.homedir(), scratchRoot = '/tmp/opencode/sandbox',
-  bwrap = '/usr/bin/bwrap', env = process.env, readOnly = false, writablePaths = [], protectedPaths: extraProtected = [], maskedPaths = [], timeout, signal }) {
+export async function spawnSandbox({
+  workspace, cwd, command, home = os.homedir(), scratchRoot = '/tmp/opencode/sandbox', nativeTempRoot,
+  bwrap = '/usr/bin/bwrap', env = process.env, readOnly = false, writablePaths = [],
+  protectedPaths: extraProtected = [], maskedPaths = [], timeout = 120000, signal,
+  logFile, eagerLog = false, pruneLogs = true,
+}) {
   if (typeof command !== 'string' || command.includes('\0')) throw unavailable('invalid command');
   workspace = realDir(workspace); home = realDir(home);
   cwd = cwd ? realDir(path.resolve(workspace, cwd)) : workspace;
@@ -194,41 +450,133 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
   // Never make the sandbox's own implementation writable.
   if (writable && inside(INSTALL_DIR, workspace)) throw unavailable('workspace contains the sandbox implementation');
   privateDir(scratchRoot);
+  const realScratchRoot = fs.realpathSync(scratchRoot);
   const hash = createHash('sha256').update(workspace).digest('hex').slice(0, 16);
-  const scratch = path.join(scratchRoot, hash);
-  for (const dir of [scratch, ...['tmp', 'run', 'cache'].map(n => path.join(scratch, n))]) privateDir(dir);
-  const lock = path.join(scratchRoot, hash + '.lock');
-  let lockFD;
-  try { lockFD = fs.openSync(lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, 0o600); }
-  catch { throw unavailable('workspace is busy or has a stale lock: ' + lock); }
-  const placeholders = [];
+  const scratch = path.join(realScratchRoot, hash);
+  const logDir = path.join(realScratchRoot, hash + '.logs');
+  const leasesFile = path.join(realScratchRoot, hash + '.leases.json');
+  for (const dir of [scratch, logDir, ...['tmp', 'run', 'cache'].map(n => path.join(scratch, n))]) privateDir(dir);
+
+  const leaseId = randomUUID();
+  let leaseAcquired = false;
   let filterFD;
   const narrowFDs = [];
+  let placeholderPaths = [];
+
+  const releaseLease = async () => {
+    if (!leaseAcquired) return;
+    leaseAcquired = false;
+    await withCoordLock(realScratchRoot, hash, async () => {
+      const leases = readLeases(leasesFile);
+      const mine = leases[leaseId]?.placeholders ?? [];
+      delete leases[leaseId];
+      pruneDeadLeases(leases);
+      const stillReferenced = new Set();
+      for (const entry of Object.values(leases)) {
+        for (const p of entry.placeholders ?? []) stillReferenced.add(p.file);
+      }
+      for (const p of [...mine].reverse()) {
+        if (!stillReferenced.has(p.file)) removePlaceholderIfUnchanged(p);
+      }
+      writeLeases(leasesFile, leases);
+    });
+  };
+  const closeSetupFDs = () => {
+    if (filterFD !== undefined) { try { fs.closeSync(filterFD); } catch { /* ignore */ } filterFD = undefined; }
+    while (narrowFDs.length) { try { fs.closeSync(narrowFDs.pop()); } catch { /* ignore */ } }
+  };
+
   try {
     const args = ['--unshare-all', '--die-with-parent', '--new-session', '--cap-drop', 'ALL',
       '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/run', '--tmpfs', '/tmp', '--tmpfs', '/dev/shm'];
     if (!SPECIAL_ROOTS.has(workspace)) args.push(writable ? '--bind' : '--ro-bind', workspace, workspace);
-    args.push('--bind', scratch, scratch);
+
+    // Optional safe /tmp/opencode bridge (host /tmp remains isolated via --tmpfs /tmp).
+    if (nativeTempRoot && isSafeOwnedDir(nativeTempRoot)) {
+      const realTemp = fs.realpathSync(nativeTempRoot);
+      if (realTemp !== realScratchRoot && !inside(workspace, realTemp)) {
+        args.push(writable ? '--bind' : '--ro-bind', realTemp, realTemp);
+      }
+    }
+    // Mask host-trusted coordination state (locks, leases, logs, sibling scratches),
+    // while exposing only this workspace's private scratch directory.
+    if (!inside(workspace, realScratchRoot)) {
+      args.push('--tmpfs', realScratchRoot, '--bind', scratch, scratch, '--remount-ro', realScratchRoot);
+    } else {
+      args.push('--bind', scratch, scratch);
+    }
+
     const narrowPosition = args.length;
     const protectedPaths = new Set();
+
     if (writable) {
-      for (const name of RESERVED.keys()) protectedPaths.add(path.join(workspace, name));
-      // Existing nested repositories must not expose writable Git metadata.
-      gitTreeMounts(workspace, protectedPaths, {workspace, cwd, placeholders});
-      for (const p of placeholders) protectedPaths.add(p.file);
+      const placeholderDirs = new Set([workspace, cwd]);
+      await scanTree(workspace, protectedPaths, placeholderDirs, workspace, cwd);
+      await withCoordLock(realScratchRoot, hash, async () => {
+        const legacyLock = path.join(realScratchRoot, hash + '.lock');
+        try {
+          const st = fs.lstatSync(legacyLock);
+          if (st.isFile() && st.uid === process.getuid() && st.size === 0) fs.unlinkSync(legacyLock);
+        } catch { /* ignore */ }
+        const leases = readLeases(leasesFile);
+        pruneDeadLeases(leases);
+        const livePlaceholders = new Map();
+        for (const entry of Object.values(leases)) {
+          for (const p of entry.placeholders ?? []) livePlaceholders.set(p.file, p);
+        }
+        const mine = [];
+        for (const directory of placeholderDirs) {
+          for (const [name, kind] of RESERVED) {
+            if (name === '.git' && directory !== workspace) continue;
+            const file = path.join(directory, name);
+            const tracked = livePlaceholders.get(file);
+            if (tracked) {
+              const st = fs.lstatSync(file, { throwIfNoEntry: false });
+              if (st && st.ino === tracked.ino && st.dev === tracked.dev) {
+                mine.push(tracked);
+                protectedPaths.add(file);
+                continue;
+              }
+            }
+            try {
+              if (kind === 'dir') fs.mkdirSync(file, { mode: 0o555 });
+              else fs.writeFileSync(file, '{}\n', { flag: 'wx', mode: 0o444 });
+              const st = fs.lstatSync(file);
+              const record = { file, kind, ino: st.ino, dev: st.dev };
+              mine.push(record);
+              livePlaceholders.set(file, record);
+              protectedPaths.add(file);
+            } catch (e) {
+              if (e.code !== 'EEXIST') throw e;
+              if (fs.lstatSync(file).isSymbolicLink()) throw unavailable('symlinked reserved configuration path: ' + file);
+              protectedPaths.add(file);
+            }
+          }
+        }
+        leases[leaseId] = { pid: process.pid, createdAt: Date.now(), placeholders: mine };
+        writeLeases(leasesFile, leases);
+        leaseAcquired = true;
+        placeholderPaths = mine.map(p => p.file);
+      });
+    } else {
+      // Read-only / planner invocations do not block on writers; still ignore
+      // any live writer placeholders in git status.
+      placeholderPaths = activePlaceholders(workspace, realScratchRoot);
     }
-    for (const value of [INSTALL_DIR, policyPaths(home,env).cacheDir, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {
+
+    for (const value of [INSTALL_DIR, policyPaths(home, env).cacheDir, path.join(home, '.config/opencode'), path.join(home, '.cache/opencode')]) {
       if (fs.existsSync(value)) protectedPaths.add(value);
     }
     for (const value of extraProtected) if (fs.existsSync(value)) protectedPaths.add(fs.realpathSync(value));
     for (const value of protectedPaths) args.push('--ro-bind', value, value);
-    for (const value of [...new Set([...privatePaths(home,env), ...maskedPaths])].sort((a,b)=>a.length-b.length)) {
+    for (const value of [...new Set([...privatePaths(home, env), ...maskedPaths])].sort((a, b) => a.length - b.length)) {
       if (!path.isAbsolute(value)) throw unavailable('mask path must be absolute');
       if (!fs.existsSync(value)) continue;
       const real = fs.realpathSync(value);
       if (fs.statSync(real).isDirectory()) args.push('--tmpfs', real, '--remount-ro', real);
       else args.push('--ro-bind', '/dev/null', real);
     }
+
     const childEnv = cleanEnvironment(env, home, scratch);
     if (narrowTargets.length) {
       // Create only validated output roots, inside a separate confined namespace.
@@ -237,7 +585,7 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
       const binding = preparation.findIndex((arg, i) => arg === '--ro-bind' && preparation[i + 1] === workspace);
       if (binding < 0) throw unavailable('planning workspace mount is unavailable');
       preparation[binding] = '--bind';
-      const prepareFD = socketFilterFD(scratchRoot);
+      const prepareFD = socketFilterFD(realScratchRoot);
       try {
         const prepared = await runProcess(bwrap, [...preparation, '--seccomp', '3', '--chdir', workspace, '--', '/usr/bin/mkdir', '-p', '--', ...narrowTargets],
           { cwd: '/', env: childEnv, timeout: 10000, signal, extraFD: prepareFD });
@@ -251,50 +599,81 @@ async function executeSandbox({ workspace, cwd, command, home = os.homedir(), sc
         narrowFDs.push(fd);
         if (fs.realpathSync('/proc/self/fd/' + fd) !== target) throw unavailable('planning root changed during setup');
         mounts.push('--bind-fd', String(4 + i), target);
-        const metadata = new Set(); gitTreeMounts(target, metadata);
+        const metadata = new Set();
+        await scanTree(target, metadata, null, workspace, cwd);
         for (const meta of metadata) args.push('--ro-bind', meta, meta);
       }
       // Protected/credential mounts remain later and therefore authoritative.
       args.splice(narrowPosition, 0, ...mounts);
     }
-    // Hide only our transient placeholders from Git's untracked-file listing.
-    // The existing excludes file is read inside bwrap, never by a host process.
-    // These scratch writes also occur inside bwrap, so symlinks cannot turn them
-    // into privileged host-side writes.
+
+    // Hide transient placeholders from Git's untracked-file listing inside each
+    // invocation's private ephemeral /tmp so concurrent runs never collide.
     const bootstrap = `
 original=$(git config --path --get core.excludesFile 2>/dev/null || :)
 if [[ -z "$original" ]]; then original="$HOME/.config/git/ignore"; fi
 if [[ -f "$original" ]]; then cat -- "$original" > "$OPENCODE_GIT_EXCLUDES"; else : > "$OPENCODE_GIT_EXCLUDES"; fi
-printf '\\n%s\\n' "$OPENCODE_PLACEHOLDER_IGNORE" >> "$OPENCODE_GIT_EXCLUDES"
+if [[ -n "$OPENCODE_PLACEHOLDER_IGNORE" ]]; then printf '\\n%s\\n' "$OPENCODE_PLACEHOLDER_IGNORE" >> "$OPENCODE_GIT_EXCLUDES"; fi
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0="$OPENCODE_GIT_EXCLUDES"
 exec /bin/bash --noprofile --norc -c "$1"
 `;
-    childEnv.OPENCODE_GIT_EXCLUDES = path.join(scratch, 'run/git-excludes');
-    childEnv.OPENCODE_PLACEHOLDER_IGNORE = placeholders.map(p => '/' + path.relative(workspace, p.file).split(path.sep).join('/')).join('\n');
-    filterFD = socketFilterFD(scratchRoot);
+    childEnv.OPENCODE_GIT_EXCLUDES = '/tmp/.opencode-git-excludes';
+    childEnv.OPENCODE_PLACEHOLDER_IGNORE = placeholderPaths
+      .filter(file => inside(file, workspace))
+      .map(file => '/' + path.relative(workspace, file).split(path.sep).join('/'))
+      .join('\n');
+
+    filterFD = socketFilterFD(realScratchRoot);
     args.push('--seccomp', '3', '--chdir', cwd, '--', '/bin/bash', '--noprofile', '--norc', '-c', bootstrap, 'opencode-sandbox', command);
-    const result = await runProcess(bwrap, args, { cwd: '/', env: childEnv, timeout, signal, extraFD: filterFD, extraFDs: narrowFDs });
-    return { ...result, scratch };
-  } finally {
-    if (filterFD !== undefined) fs.closeSync(filterFD);
-    for (const fd of narrowFDs) fs.closeSync(fd);
-    for (const { file, kind, ino, dev } of placeholders.reverse()) {
-      try {
-        const stat = fs.lstatSync(file);
-        if (stat.ino !== ino || stat.dev !== dev) continue;
-        if (kind === 'dir') fs.rmdirSync(file);
-        else if (stat.isFile() && fs.readFileSync(file, 'utf8') === '{}\n') fs.unlinkSync(file);
-      } catch { /* Preserve anything changed or replaced by another host process. */ }
-    }
-    fs.closeSync(lockFD); fs.unlinkSync(lock);
+
+    const makeLogPath = () => path.join(logDir, `${Date.now()}-${leaseId.slice(0, 8)}.log`);
+    const resolvedLogFile = logFile ?? (eagerLog ? makeLogPath() : undefined);
+    const proc = spawnProcess(bwrap, args, {
+      cwd: '/', env: childEnv, timeout, signal, extraFD: filterFD, extraFDs: narrowFDs,
+      logFile: resolvedLogFile,
+      spillLog: resolvedLogFile ? undefined : makeLogPath,
+    });
+    // Child process has inherited filterFD and narrowFDs; close parent copies now.
+    closeSetupFDs();
+
+    let released = false;
+    const release = async () => {
+      if (released) return;
+      released = true;
+      await releaseLease();
+    };
+    const done = proc.done.then(
+      async result => {
+        if (pruneLogs && result.log_path) pruneWorkspaceLogs(logDir, new Set(), 32, result.log_path);
+        return { ...result, scratch };
+      },
+      async error => {
+        await release();
+        throw error;
+      },
+    );
+    return {
+      child: proc.child,
+      kill: proc.kill,
+      tail: proc.tail,
+      logPath: proc.logPath,
+      logBytes: proc.logBytes,
+      scratch,
+      logDir,
+      workspace,
+      cwd,
+      done,
+      release,
+    };
+  } catch (error) {
+    closeSetupFDs();
+    await releaseLease();
+    throw error;
   }
 }
 
 export async function runSandbox(options) {
-  const key = realDir(options.workspace);
-  const previous = queues.get(key) ?? Promise.resolve();
-  const pending = previous.catch(() => {}).then(() => executeSandbox(options));
-  queues.set(key, pending);
-  try { return await pending; }
-  finally { if (queues.get(key) === pending) queues.delete(key); }
+  const handle = await spawnSandbox(options);
+  try { return await handle.done; }
+  finally { await handle.release(); }
 }

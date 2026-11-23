@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { execFileSync } from 'node:child_process';
-import { runSandbox, runProcess } from '../sandbox.mjs';
+import { runSandbox, runProcess, spawnSandbox, activePlaceholders, inspectScratchHealth, workspaceHash } from '../sandbox.mjs';
 
 const q = s => "'" + s.replaceAll("'", "'\\''") + "'";
 function fixture(t) {
@@ -29,22 +29,37 @@ test('workspace and scratch writes work, external and symlink writes fail', asyn
   assert.ok(fs.existsSync(path.join(r.scratch, 'tmp/probe')));
 });
 
-test('workspace protection scans each directory once without skipping dependencies', async t => {
+test('workspace protection scans each directory once asynchronously without redundant lstat calls', async t => {
   const o = fixture(t);
   const nested = path.join(o.workspace, 'node_modules/pkg');
-  fs.mkdirSync(nested, {recursive: true});
+  const plain = path.join(o.workspace, 'node_modules/plain');
+  fs.mkdirSync(nested, { recursive: true });
+  fs.mkdirSync(plain, { recursive: true });
   fs.writeFileSync(path.join(nested, 'opencode.json'), '{}');
-  const original = fs.readdirSync, counts = new Map();
-  fs.readdirSync = function(file, ...args) {
+  fs.writeFileSync(path.join(plain, 'index.js'), 'export default 1;\n');
+  const originalReaddir = fs.promises.readdir, counts = new Map();
+  const originalLstat = fs.lstatSync, originalAsyncLstat = fs.promises.lstat;
+  let plainLstats = 0;
+  fs.promises.readdir = async function(file, ...args) {
     if (String(file).startsWith(o.workspace)) counts.set(String(file), (counts.get(String(file)) ?? 0) + 1);
-    return original.call(this, file, ...args);
+    return originalReaddir.call(this, file, ...args);
+  };
+  fs.lstatSync = function(file, ...args) {
+    if (String(file).startsWith(plain + path.sep)) plainLstats++;
+    return originalLstat.call(this, file, ...args);
+  };
+  fs.promises.lstat = async function(file, ...args) {
+    if (String(file).startsWith(plain + path.sep)) plainLstats++;
+    return originalAsyncLstat.call(this, file, ...args);
   };
   let result;
-  try { result = await runSandbox({...o, command: '! touch node_modules/pkg/opencode.jsonc; printf done'}); }
-  finally { fs.readdirSync = original; }
+  try { result = await runSandbox({ ...o, command: '! touch node_modules/pkg/opencode.jsonc; printf done' }); }
+  finally { fs.promises.readdir = originalReaddir; fs.lstatSync = originalLstat; fs.promises.lstat = originalAsyncLstat; }
   assert.equal(result.exit_code, 0, result.content);
   assert.equal(counts.get(nested), 1);
+  assert.equal(counts.get(plain), 1);
   assert.ok([...counts.values()].every(n => n === 1), JSON.stringify([...counts]));
+  assert.equal(plainLstats, 0, 'Non-reserved directory must not incur redundant lstat syscalls');
   assert.ok(!fs.existsSync(path.join(nested, 'opencode.jsonc')));
 });
 
@@ -227,4 +242,151 @@ test('timed-out commands cannot create delayed files', async t => {
   assert.equal(killed.exit_code, 124);
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.ok(!fs.existsSync(path.join(o.workspace, 'delayed')));
+});
+
+test('truncated foreground output spills complete log outside writable scratch and rotates old logs', async t => {
+  const o = fixture(t);
+  const small = await runSandbox({ ...o, command: 'printf small-ok' });
+  assert.equal(small.log_path, undefined);
+  for (const [label, cmd, needle] of [
+    ['lines', 'seq 1 2500', '\n1234\n'],
+    ['bytes', "printf 'START\\n'; head -c 35000 /dev/zero | tr '\\0' a; printf '\\nMID_SENTINEL\\n'; head -c 35000 /dev/zero | tr '\\0' b; printf '\\nEND\\n'", 'MID_SENTINEL'],
+  ]) {
+    const r = await runSandbox({ ...o, command: cmd });
+    assert.equal(r.exit_code, 0, label + ': ' + r.content);
+    assert.equal(r.truncated, true, label);
+    assert.ok(r.log_path, label + ' must return log_path');
+    assert.ok(r.log_path.startsWith(o.scratchRoot + path.sep), r.log_path);
+    assert.ok(!r.log_path.startsWith(r.scratch + path.sep), 'log must live outside writable scratch mount');
+    const st = fs.statSync(r.log_path);
+    assert.equal(st.mode & 0o077, 0);
+    const full = fs.readFileSync(r.log_path, 'utf8');
+    assert.ok(full.includes(needle), label + ' full log missed middle bytes');
+  }
+  const logDir = path.join(o.scratchRoot, workspaceHash(o.workspace) + '.logs');
+  for (let i = 0; i < 36; i++) fs.writeFileSync(path.join(logDir, `old-${String(i).padStart(2, '0')}.log`), 'x', { mode: 0o600 });
+  await runSandbox({ ...o, command: 'seq 1 2500' });
+  assert.ok(fs.readdirSync(logDir).length <= 32);
+});
+
+test('read-only commands run concurrently with active writable commands and concurrent writers share ref-counted placeholders', async t => {
+  const o = fixture(t);
+  execFileSync('git', ['init', '--quiet', o.workspace]);
+  const start = Date.now();
+  const writer = runSandbox({ ...o, command: 'sleep 0.6; touch from-writer' });
+  await new Promise(resolve => setTimeout(resolve, 120));
+  const readerStart = Date.now();
+  const reader = await runSandbox({ ...o, readOnly: true, command: 'git status --porcelain; printf reader-ok' });
+  const readerElapsed = Date.now() - readerStart;
+  assert.equal(reader.exit_code, 0, reader.content);
+  assert.equal(reader.content, 'reader-ok');
+  assert.ok(readerElapsed < 400, `read-only command waited ${readerElapsed}ms behind writer`);
+  const writer2 = runSandbox({ ...o, command: '! touch opencode.json; touch from-writer-2' });
+  const [r1, r2] = await Promise.all([writer, writer2]);
+  assert.equal(r1.exit_code, 0, r1.content);
+  assert.equal(r2.exit_code, 0, r2.content);
+  assert.ok(Date.now() - start < 2500);
+  assert.ok(fs.existsSync(path.join(o.workspace, 'from-writer')));
+  assert.ok(fs.existsSync(path.join(o.workspace, 'from-writer-2')));
+  assert.equal(fs.existsSync(path.join(o.workspace, 'opencode.json')), false);
+  assert.equal(fs.existsSync(path.join(o.workspace, '.opencode')), false);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+});
+
+test('dead-PID coord lock and leases self-recover while preserving user-modified files', async t => {
+  const o = fixture(t);
+  fs.mkdirSync(o.scratchRoot, { recursive: true, mode: 0o700 });
+  const hash = workspaceHash(o.workspace);
+  const deadPid = 99999999;
+  const stalePlaceholder = path.join(o.workspace, 'opencode.jsonc');
+  fs.writeFileSync(stalePlaceholder, '{}\n', { mode: 0o444 });
+  const stPlaceholder = fs.lstatSync(stalePlaceholder);
+  const userModified = path.join(o.workspace, 'opencode.json');
+  fs.writeFileSync(userModified, '{"user":true}\n', { mode: 0o600 });
+  const stUser = fs.lstatSync(userModified);
+  fs.writeFileSync(path.join(o.scratchRoot, hash + '.coord.lock'), JSON.stringify({ pid: deadPid, createdAt: 1 }), { mode: 0o600 });
+  fs.writeFileSync(path.join(o.scratchRoot, hash + '.lock'), '', { mode: 0o600 });
+  fs.writeFileSync(path.join(o.scratchRoot, hash + '.leases.json'), JSON.stringify({
+    schemaVersion: 1,
+    leases: {
+      dead1: {
+        pid: deadPid, createdAt: 1,
+        placeholders: [
+          { file: stalePlaceholder, kind: 'file', ino: stPlaceholder.ino, dev: stPlaceholder.dev },
+          { file: userModified, kind: 'file', ino: stUser.ino, dev: stUser.dev },
+        ],
+      },
+    },
+  }), { mode: 0o600 });
+  const beforeHealth = inspectScratchHealth(o.scratchRoot);
+  assert.equal(beforeHealth.ok, true);
+  assert.ok(beforeHealth.staleLocks >= 1 && beforeHealth.staleLeases >= 1, JSON.stringify(beforeHealth));
+  const r = await runSandbox({ ...o, command: 'printf recovered' });
+  assert.equal(r.exit_code, 0, r.content);
+  assert.equal(r.content, 'recovered');
+  assert.equal(fs.existsSync(stalePlaceholder), false, 'unchanged dead-PID placeholder should be removed');
+  assert.equal(fs.readFileSync(userModified, 'utf8'), '{"user":true}\n', 'user-modified file must be preserved');
+  assert.equal(fs.existsSync(path.join(o.scratchRoot, hash + '.lock')), false);
+});
+
+test('safe nativeTempRoot bridges files into sandbox while masking scratchRoot, leases, logs, and host /tmp sockets', async t => {
+  const o = fixture(t);
+  const nativeTempRoot = path.join(o.root, 'opencode-temp');
+  const scratchRoot = path.join(nativeTempRoot, 'sandbox');
+  fs.mkdirSync(nativeTempRoot, { mode: 0o700 });
+  fs.writeFileSync(path.join(nativeTempRoot, 'shared.txt'), 'FROM_NATIVE');
+  const siblingScratch = path.join(scratchRoot, 'deadbeef01234567');
+  fs.mkdirSync(siblingScratch, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(siblingScratch, 'secret'), 'OTHER_WORKSPACE_SECRET');
+  const hash = workspaceHash(o.workspace);
+  const logDir = path.join(scratchRoot, hash + '.logs');
+  fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(logDir, 'prior.log'), 'HOST_LOG_SENTINEL', { mode: 0o600 });
+  const r = await runSandbox({
+    ...o, scratchRoot, nativeTempRoot,
+    command: `cat ${q(path.join(nativeTempRoot, 'shared.txt'))}; printf ':'; `
+      + `printf FROM_SHELL > ${q(path.join(nativeTempRoot, 'reply.txt'))}; `
+      + `! cat ${q(path.join(siblingScratch, 'secret'))} 2>/dev/null; `
+      + `! cat ${q(path.join(logDir, 'prior.log'))} 2>/dev/null; `
+      + `! cat ${q(path.join(scratchRoot, hash + '.leases.json'))} 2>/dev/null`,
+  });
+  assert.equal(r.exit_code, 0, r.content);
+  assert.equal(r.content, 'FROM_NATIVE:');
+  assert.equal(fs.readFileSync(path.join(nativeTempRoot, 'reply.txt'), 'utf8'), 'FROM_SHELL');
+  // Read-only agent sees nativeTempRoot read-only.
+  const ro = await runSandbox({ ...o, scratchRoot, nativeTempRoot, readOnly: true, command: `! touch ${q(path.join(nativeTempRoot, 'ro-blocked'))}` });
+  assert.equal(ro.exit_code, 0, ro.content);
+  assert.equal(fs.existsSync(path.join(nativeTempRoot, 'ro-blocked')), false);
+});
+
+test('cleanEnvironment configures scratch cache dirs and preserves safe toolchain locators while stripping secrets', async t => {
+  const o = fixture(t);
+  const r = await runSandbox({
+    ...o,
+    env: { ...process.env, VIRTUAL_ENV: '/opt/venv', CARGO_HOME: '/opt/cargo', GOPATH: '/opt/go', VIRTUAL_ENV_SECRET: 'DO-NOT-EXPOSE' },
+    command: 'printf "%s|%s|%s|%s|%s|%s|%s" "$PYTHONDONTWRITEBYTECODE" "$PYTHONPYCACHEPREFIX" "$RUFF_CACHE_DIR" "$MYPY_CACHE_DIR" "$VIRTUAL_ENV" "$CARGO_HOME" "$VIRTUAL_ENV_SECRET"',
+  });
+  assert.equal(r.exit_code, 0, r.content);
+  const [noPyc, pycache, ruff, mypy, venv, cargo, secret] = r.content.split('|');
+  assert.equal(noPyc, '1');
+  assert.ok(pycache.startsWith(r.scratch + '/cache/'));
+  assert.ok(ruff.startsWith(r.scratch + '/cache/'));
+  assert.ok(mypy.startsWith(r.scratch + '/cache/'));
+  assert.equal(venv, '/opt/venv');
+  assert.equal(cargo, '/opt/cargo');
+  assert.equal(secret, '');
+});
+
+test('spawnSandbox exposes a running process handle with active lease until release', async t => {
+  const o = fixture(t);
+  const handle = await spawnSandbox({ ...o, command: 'sleep 0.3; printf spawned-ok' });
+  try {
+    assert.ok(activePlaceholders(o.workspace, o.scratchRoot).length > 0);
+    const result = await handle.done;
+    assert.equal(result.exit_code, 0, result.content);
+    assert.equal(result.content, 'spawned-ok');
+  } finally {
+    await handle.release();
+  }
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
 });
