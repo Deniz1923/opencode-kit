@@ -750,7 +750,7 @@ class AgentIntegration(unittest.TestCase):
                 return 'Background test'
             if state['step'] == 0:
                 state['step'] = 1
-                return 'sandbox_shell', {'command': 'printf BG_ONE\\n; sleep 1.4; printf BG_TWO\\n; touch bg-finished', 'background': True}
+                return 'sandbox_shell', {'command': "printf 'BG_ONE\\n'; sleep 2.5; printf 'BG_TWO\\n'; touch bg-finished", 'background': True}
             if state['step'] == 1:
                 tool_text = str(messages[-1].get('content', ''))
                 match = re.search(r'(job_[a-f0-9]+)', tool_text)
