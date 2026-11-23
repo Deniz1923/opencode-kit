@@ -76,8 +76,8 @@ export function compose(text, selection, resolutions = {}) {
       let proposed = value;
       if (!selection.sandbox) {
         const blocked = access.profile !== 'workspace-write'
-          ? ['edit', 'shell', 'execute', 'subagent', 'sandbox_shell', 'shell_unsandboxed', 'opencode_worktree_create']
-          : access.shell ? [] : ['shell', 'execute', 'sandbox_shell', 'shell_unsandboxed'];
+          ? ['edit', 'shell', 'execute', 'subagent', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed', 'opencode_worktree_create']
+          : access.shell ? [] : ['shell', 'execute', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed'];
         if (blocked.length) {
           proposed = { ...value, permissions: [
             ...(value.permissions ?? []).filter(rule => !blocked.includes(rule.action) || rule.resource !== '*'),

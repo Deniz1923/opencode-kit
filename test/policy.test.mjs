@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { validatePolicy, loadPolicy, agentAccess, canEdit, policyPaths, canonicalTarget } from '../policy.mjs';
+import { validatePolicy, loadPolicy, agentAccess, canEdit, isProjectConfigEdit, policyPaths, canonicalTarget } from '../policy.mjs';
 
 const policy = { schemaVersion: 1, scratchRoot: '/tmp/opencode/sandbox', agents: {
   build: { profile: 'workspace-write', shell: true, escape: 'ask' },
@@ -65,4 +65,23 @@ test('missing targets behind symlinks resolve to their actual destination', t =>
   fs.symlinkSync('loop', path.join(root, 'loop'));
   assert.throws(() => canonicalTarget(path.join(root, 'loop')), /symlink|loop/i);
   assert.equal(canonicalTarget(path.join(root, 'project/new/file')), path.join(root, 'project/new/file'));
+});
+
+test('isProjectConfigEdit distinguishes project config/agent paths from Git metadata and ordinary files', () => {
+  const ws = '/work/project';
+  for (const file of [
+    '/work/project/opencode.json',
+    '/work/project/sub/opencode.jsonc',
+    '/work/project/.opencode/agent.md',
+    '/work/project/.agents/reviewer.md',
+    '/work/project/.claude/settings.json',
+    '/work/project/.mcp.json',
+  ]) assert.equal(isProjectConfigEdit(file, ws), true, file);
+  for (const file of [
+    '/work/project/.git/config',
+    '/work/project/.git/hooks/pre-commit',
+    '/work/project/.claude/.git/HEAD',
+    '/work/project/src/main.js',
+    '/other/opencode.json',
+  ]) assert.equal(isProjectConfigEdit(file, ws), false, file);
 });

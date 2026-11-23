@@ -4,8 +4,10 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 export const PLANNING_ROOTS = ['docs/superpowers/specs', 'docs/superpowers/plans'];
+export const GIT_RESERVED = new Set(['.git']);
+export const CONFIG_RESERVED = new Set(['.opencode', '.agents', '.claude', '.mcp.json', 'opencode.json', 'opencode.jsonc']);
 const modes = new Set(['read-only', 'planner', 'workspace-write']);
-const reserved = new Set(['.git', '.opencode', '.agents', '.claude', '.mcp.json', 'opencode.json', 'opencode.jsonc']);
+const reserved = new Set([...GIT_RESERVED, ...CONFIG_RESERVED]);
 export function inside(child, parent) {
   const rel = path.relative(parent, child);
   return rel === '' || (rel !== '..' && !rel.startsWith('../') && !path.isAbsolute(rel));
@@ -94,4 +96,9 @@ export function canEdit(access, target, { workspace, scratch }) {
   if (path.relative(workspace, target).split(path.sep).some(p => reserved.has(p))) return false;
   if (access.profile === 'workspace-write') return true;
   return access.profile === 'planner' && access.planningRoots.some(root => inside(target, path.join(workspace, root)));
+}
+export function isProjectConfigEdit(target, workspace) {
+  if (!inside(target, workspace)) return false;
+  const parts = path.relative(workspace, target).split(path.sep);
+  return !parts.some(p => GIT_RESERVED.has(p)) && parts.some(p => CONFIG_RESERVED.has(p));
 }

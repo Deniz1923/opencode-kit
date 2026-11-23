@@ -390,3 +390,79 @@ test('ordinary shell has no approval reason field and restriction failures expla
   const normal = await h.tools.get('sandbox_shell').execute({command:'printf "test assertion failed"; exit 1'}, h.toolCtx);
   assert.doesNotMatch(normal.content, /shell_unsandboxed/);
 });
+
+test('project config edits prompt ask for workspace-write, keep .git denied, and block while active placeholder is held', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  const evalEdit = async (resource, agent = 'build', effect = 'allow') => {
+    const e = { action: 'edit', effect, agent, sessionID: 'ses_test', resources: [resource] };
+    await h.hooks.get('evaluate')(e);
+    return e;
+  };
+  for (const file of ['opencode.json', '.claude/settings.json', '.agents/x.md', '.opencode/foo.js', '.mcp.json']) {
+    assert.equal((await evalEdit(file, 'build', 'allow')).effect, 'ask', file);
+    assert.equal((await evalEdit(file, 'build', 'deny')).effect, 'deny', file);
+    assert.equal((await evalEdit(file, 'plan', 'allow')).effect, 'deny', file);
+    assert.equal((await evalEdit(file, 'explore', 'allow')).effect, 'deny', file);
+  }
+  assert.equal((await evalEdit('.git/config', 'build', 'allow')).effect, 'deny');
+  const started = await h.tools.get('sandbox_shell').execute({ command: 'sleep 5', background: true }, h.toolCtx);
+  assert.equal(started.metadata.status, 'running');
+  const blocked = await evalEdit('opencode.json', 'build', 'allow');
+  assert.equal(blocked.effect, 'deny');
+  assert.match(blocked.message, /sandbox_job/i);
+  await h.tools.get('sandbox_job').execute({ action: 'cancel', job_id: started.metadata.job_id }, h.toolCtx);
+  assert.equal((await evalEdit('opencode.json', 'build', 'allow')).effect, 'ask');
+});
+
+test('external_directory resolves relative resources against session directory', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  const e = { action: 'external_directory', effect: 'ask', agent: 'build', sessionID: 'ses_test', resources: ['sub/*'] };
+  await h.hooks.get('evaluate')(e);
+  assert.equal(e.effect, 'allow');
+});
+
+test('restrictionHint handles DNS, ECONNREFUSED, EROFS, and Git metadata failures', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  for (const [cmd, expected] of [
+    ['printf "getaddrinfo EAI_AGAIN registry.npmjs.org" >&2; exit 1', /Network is disabled.*shell_unsandboxed/i],
+    ['printf "Error: connect ECONNREFUSED 127.0.0.1:3000" >&2; exit 1', /Network is disabled.*shell_unsandboxed/i],
+    ['printf "fatal: Unable to create .git/index.lock: Read-only file system" >&2; exit 1', /Git metadata is read-only.*shell_unsandboxed/i],
+    ['printf "EROFS: read-only file system" >&2; exit 1', /shell_unsandboxed/i],
+  ]) {
+    const r = await h.tools.get('sandbox_shell').execute({ command: cmd }, h.toolCtx);
+    assert.match(r.content, expected, cmd);
+  }
+});
+
+test('sandbox_shell background mode, sandbox_job lifecycle, spillover notice, and shell-denied guard work end-to-end', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  assert.ok(h.tools.get('sandbox_job'), 'sandbox_job tool must be registered');
+  await assert.rejects(
+    h.tools.get('sandbox_job').execute({ action: 'list' }, { ...h.toolCtx, agent: 'strict/reviewer' }),
+    /terminal|shell.*denied/i,
+  );
+  const spilled = await h.tools.get('sandbox_shell').execute({ command: 'seq 1 2500' }, h.toolCtx);
+  assert.equal(spilled.metadata.exit_code, 0);
+  assert.ok(spilled.metadata.log_path);
+  assert.match(spilled.content, /full output saved to /i);
+  const started = await h.tools.get('sandbox_shell').execute({ command: 'printf bg-start\\n; sleep 1.4; printf bg-end\\n', background: true }, h.toolCtx);
+  assert.equal(started.metadata.status, 'running');
+  const jobId = started.metadata.job_id;
+  assert.ok(jobId);
+  const listed = await h.tools.get('sandbox_job').execute({ action: 'list' }, h.toolCtx);
+  assert.match(listed.content, new RegExp(jobId));
+  const otherList = await h.tools.get('sandbox_job').execute({ action: 'list' }, { ...h.toolCtx, sessionID: 'ses_other' });
+  assert.doesNotMatch(otherList.content, new RegExp(jobId));
+  const waited = await h.tools.get('sandbox_job').execute({ action: 'wait', job_id: jobId, wait_ms: 5000 }, h.toolCtx);
+  assert.equal(waited.metadata.status, 'exited');
+  assert.equal(waited.metadata.exit_code, 0);
+  assert.match(waited.content, /bg-end/);
+});

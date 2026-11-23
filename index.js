@@ -1,33 +1,94 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runSandbox, runProcess, inside } from './sandbox.mjs';
-import { loadPolicy, agentAccess, canEdit, canonicalTarget, scratchPath, policyPaths, privatePaths } from './policy.mjs';
+import { runSandbox, runProcess, inside, activePlaceholders } from './sandbox.mjs';
+import { createJobManager } from './jobs.mjs';
+import { loadPolicy, agentAccess, canEdit, isProjectConfigEdit, canonicalTarget, scratchPath, policyPaths, privatePaths } from './policy.mjs';
 import { deniedAction, workflowPermissions } from './workflow-policy.mjs';
 import { workspaceStore } from './workspaces.mjs';
-const inputSchema = {
+
+const baseShellSchema = {
   type: 'object',
   properties: {
     command: { type: 'string', description: 'The shell command to execute.' },
     workdir: { type: 'string', description: 'Directory inside an approved workspace; defaults to the session directory.' },
-    timeout: { type: 'integer', minimum: 0, description: 'Timeout in milliseconds; default 120000.' },
+    timeout: { type: 'integer', minimum: 0, description: 'Timeout in milliseconds; default 120000 (600000 for background jobs, max 1800000).' },
   },
   required: ['command'], additionalProperties: false,
 };
-const escapeSchema = { ...inputSchema, properties: { ...inputSchema.properties,
-  reason: {type:'string', description:'Explain the required host access so the user can decide whether to approve.'} } };
+const sandboxShellSchema = {
+  ...baseShellSchema,
+  properties: {
+    ...baseShellSchema.properties,
+    background: { type: 'boolean', description: 'Run a long build, test suite, or server in the background and return a job handle (default false).' },
+  },
+};
+const escapeSchema = {
+  ...baseShellSchema,
+  properties: {
+    ...baseShellSchema.properties,
+    reason: { type: 'string', description: 'Explain the required host access so the user can decide whether to approve.' },
+  },
+};
+const jobSchema = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['list', 'status', 'wait', 'cancel'], description: 'Background job operation.' },
+    job_id: { type: 'string', description: 'Job ID for status, wait, or cancel.' },
+    wait_ms: { type: 'integer', minimum: 0, maximum: 60000, description: 'Max milliseconds to wait for completion (default 10000).' },
+  },
+  required: ['action'], additionalProperties: false,
+};
+
+const GIT_RESTRICTION = /(?:\.git\/|cannot lock ref|index\.lock)[\s\S]{0,160}(?:read-only file system|EROFS|permission denied|EACCES|operation not permitted)|(?:read-only file system|EROFS|permission denied|EACCES|operation not permitted)[\s\S]{0,160}(?:\.git\/|index\.lock)/i;
+const NET_RESTRICTION = /(?:could not resolve host|temporary failure in name resolution|name or service not known|failed to lookup address information|getaddrinfo|EAI_AGAIN|ENOTFOUND|ENETUNREACH|ECONNREFUSED|network is unreachable|network is down|connection refused|no route to host|address family not supported|EAFNOSUPPORT)/i;
+const FS_RESTRICTION = /(?:read-only file system|EROFS|operation not permitted|EPERM|permission denied|EACCES|sandbox unavailable)/i;
+
 function restrictionHint(result, access) {
-  if (result.exit_code === 0 || !/(?:could not resolve host|network is unreachable|network is down|connection refused|read-only file system|operation not permitted|permission denied|sandbox unavailable)/i.test(result.content)) return result;
+  if (result.exit_code === 0 || result.exit_code === 130) return result;
+  const text = result.content ?? '';
+  let boundary;
+  if (GIT_RESTRICTION.test(text)) boundary = 'Git metadata is read-only inside sandbox_shell.';
+  else if (NET_RESTRICTION.test(text)) boundary = 'Network is disabled inside sandbox_shell.';
+  else if (FS_RESTRICTION.test(text)) boundary = 'network is disabled, host and protected paths are read-only.';
+  else return result;
   const next = access.escape === 'ask'
     ? 'If this access is necessary for the user’s task, call shell_unsandboxed with the exact command and a short reason to request approval. Do not repeat blocked probes or conclude that network/host access is impossible. Respect rejection; never bypass it.'
     : 'This agent cannot request host execution. Continue within its allowed locations or explain the required access to the user.';
-  return {...result, content:result.content+'\n[Sandbox boundary: network is disabled, host and protected paths are read-only. '+next+']'};
+  return { ...result, content: text + '\n[Sandbox boundary: ' + boundary + ' ' + next + ']' };
 }
+
 function toolResult(result) {
   const { content, ...metadata } = result;
+  let body = content || '(no output)';
+  if (result.truncated && result.log_path) {
+    body += `\n[full output saved to ${result.log_path}; inspect with read/grep instead of re-running]`;
+  }
   const status = Number.isInteger(result.exit_code) ? '\n[exit_code: ' + result.exit_code + ']' : '';
-  return { content: (content || '(no output)') + status, metadata };
+  return { content: body + status, metadata };
 }
+
+function formatJobSummary(info, access) {
+  const parts = [`Job ${info.job_id}: ${info.status} (${info.elapsed_ms}ms)`];
+  if (Number.isInteger(info.exit_code)) parts[0] += ` [exit_code: ${info.exit_code}]`;
+  parts.push(`Log: ${info.log_path} (${info.log_bytes} bytes)`);
+  if (info.status !== 'running' && info.content !== undefined) {
+    let body = info.content || '(no output)';
+    if (info.truncated && info.log_path) {
+      body += `\n[full output saved to ${info.log_path}; inspect with read/grep instead of re-running]`;
+    }
+    const hinted = access ? restrictionHint({ content: body, exit_code: info.exit_code }, access).content : body;
+    parts.push('', hinted);
+  } else if (info.tail) {
+    const hinted = info.status !== 'running' && access
+      ? restrictionHint({ content: info.tail, exit_code: info.exit_code }, access).content
+      : info.tail;
+    parts.push('', hinted);
+  }
+  const { content: _c, tail: _t, ...metadata } = info;
+  return { content: parts.join('\n'), metadata };
+}
+
 function source(tool) {
   return { type: 'tool', messageID: tool.messageID, id: tool.id };
 }
@@ -51,6 +112,23 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
   id: 'opencode-workspace-sandbox',
   async setup(ctx) {
     const approvals = workspaceStore(path.join(path.dirname(policyFile), 'workspaces'));
+    const jobs = createJobManager();
+    let closed = false;
+    let eventIterator;
+    if (typeof ctx.event?.subscribe === 'function') {
+      try {
+        eventIterator = ctx.event.subscribe({ types: ['session.deleted'] })[Symbol.asyncIterator]();
+        const pump = async () => {
+          while (!closed) {
+            const item = await eventIterator.next();
+            if (item.done || closed) break;
+            const deletedID = item.value?.data?.sessionID;
+            if (typeof deletedID === 'string') await jobs.cleanupSession(deletedID);
+          }
+        };
+        void pump().catch(() => {});
+      } catch { /* Event subscription unavailable in minimal test hosts. */ }
+    }
     function isNativeTemp(target) {
       if (!inside(target, nativeTempRoot)) return false;
       const stat = fs.lstatSync(nativeTempRoot, { throwIfNoEntry: false });
@@ -129,30 +207,32 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         }
         return;
       }
-      if (event.effect === 'deny' || !['read', 'grep', 'glob', 'external_directory', 'edit', 'sandbox_shell', 'shell_unsandboxed'].includes(event.action)) return;
+      if (event.effect === 'deny' || !['read', 'grep', 'glob', 'external_directory', 'edit', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed'].includes(event.action)) return;
       try {
         const policy = loadPolicy(policyFile);
         const scope = await sessionScope({ sessionID: event.sessionID });
         const access = agentAccess(policy, event.agent ?? scope.agent);
         const sensitive = [...privatePaths(), path.dirname(policyFile)].map(canonicalTarget);
         if (event.action === 'external_directory') {
-          const targets = (event.resources ?? []).map(r => canonicalTarget(r.endsWith('/*') ? r.slice(0,-2) : r));
-          if (targets.length && targets.every(target => !sensitive.some(p=>inside(target,p))
-            && (inside(target, '/tmp') || scope.roots.some(root=>inside(target,root))))) event.effect = 'allow';
+          const targets = (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory, r.endsWith('/*') ? r.slice(0, -2) : r)));
+          if (targets.length && targets.every(target => !sensitive.some(p => inside(target, p))
+            && (inside(target, '/tmp') || scope.roots.some(root => inside(target, root))))) event.effect = 'allow';
         } else if (['read', 'grep', 'glob'].includes(event.action)) {
           const search = event.action !== 'read';
           const targets = search ? [canonicalTarget(path.resolve(scope.directory, event.metadata?.path ?? '.'))]
-            : (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory,r)));
-          if (!targets.length || targets.some(target=>sensitive.some(p=>inside(target,p) || (search && inside(p,target))))) {
-            event.effect='deny'; event.message='Private credentials, configuration and conversation history are protected. Narrow the search to project source, or use sandbox_shell with its private-data masks.';
+            : (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory, r)));
+          if (!targets.length || targets.some(target => sensitive.some(p => inside(target, p) || (search && inside(p, target))))) {
+            event.effect = 'deny'; event.message = 'Private credentials, configuration and conversation history are protected. Narrow the search to project source, or use sandbox_shell with its private-data masks.';
           } else if (!search) {
             // Native reads normalize internal paths to relative resources. Check
             // canonical absolute rules too, without recursing on absolute checks.
-            const absolute = targets.filter((target,i)=>event.resources[i] !== target);
-            if (absolute.length) await ctx.permission.assert({sessionID:event.sessionID, agent:event.agent, action:'read', resources:absolute,
-              metadata:event.metadata ?? {}, ...(event.source ? {source:event.source} : {})});
+            const absolute = targets.filter((target, i) => event.resources[i] !== target);
+            if (absolute.length) await ctx.permission.assert({
+              sessionID: event.sessionID, agent: event.agent, action: 'read', resources: absolute,
+              metadata: event.metadata ?? {}, ...(event.source ? { source: event.source } : {}),
+            });
           }
-        } else if (event.action === 'sandbox_shell' && !access.shell) {
+        } else if (['sandbox_shell', 'sandbox_job'].includes(event.action) && !access.shell) {
           event.effect = 'deny'; event.message = 'Agent terminal access is denied by kit policy';
         } else if (event.action === 'shell_unsandboxed') {
           event.effect = access.escape === 'ask' ? 'ask' : 'deny';
@@ -161,21 +241,41 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
           const roots = scope.roots;
           const scratchRoot = canonicalTarget(policy.scratchRoot);
           let needsDirectory = false;
+          let needsConfigAsk = false;
+          let blockedByPlaceholder = false;
           const denied = !event.resources?.length || event.resources.some(resource => {
             const target = canonicalTarget(path.resolve(scope.directory, resource));
             const paths = policyPaths();
-            if (sensitive.some(p=>inside(target,p)) || inside(target, paths.store)) return true;
+            if (sensitive.some(p => inside(target, p)) || inside(target, paths.store)) return true;
             if (access.profile === 'workspace-write' && isNativeTemp(target) && target !== nativeTempRoot
               && !inside(target, scratchRoot) && !inside(scratchRoot, target)
               && canEdit(access, target, { workspace: nativeTempRoot, scratch: scratchRoot })) return false;
-            if (!roots.some(root=>inside(target,root))) needsDirectory = true;
-            return !roots.some(workspace => canEdit(access, target, { workspace, scratch: scratchPath(workspace, scratchRoot) }));
+            if (roots.some(workspace => canEdit(access, target, { workspace, scratch: scratchPath(workspace, scratchRoot) }))) return false;
+            if (access.profile === 'workspace-write') {
+              const configRoot = roots.find(workspace => isProjectConfigEdit(target, workspace));
+              if (configRoot) {
+                const placeholders = activePlaceholders(configRoot, scratchRoot);
+                if (placeholders.some(p => inside(target, p) || inside(p, target))) {
+                  blockedByPlaceholder = true;
+                  return true;
+                }
+                needsConfigAsk = true;
+                return false;
+              }
+              if (!roots.some(root => inside(target, root))) needsDirectory = true;
+            }
+            return true;
           });
           if (denied) {
             event.effect = 'deny';
-            event.message = needsDirectory && access.profile === 'workspace-write'
-              ? 'This directory is not approved for this session. Request workspace_approve for the exact directory, then retry the native file tool. A full shell_unsandboxed escape is unnecessary for ordinary additional-workspace files.'
-              : 'File write is outside this agent’s approved output locations or targets a protected path';
+            event.message = blockedByPlaceholder
+              ? 'Cannot edit this project config path while an active background sandbox job holds its protection placeholder; wait for or cancel the job via sandbox_job first.'
+              : needsDirectory && access.profile === 'workspace-write'
+                ? 'This directory is not approved for this session. Request workspace_approve for the exact directory, then retry the native file tool. A full shell_unsandboxed escape is unnecessary for ordinary additional-workspace files.'
+                : 'File write is outside this agent’s approved output locations or targets a protected path';
+          } else if (needsConfigAsk) {
+            event.effect = 'ask';
+            event.message = 'Approve editing this project configuration or agent file?';
           }
         }
       } catch (error) { event.effect = 'deny'; event.message = error.message; }
@@ -210,8 +310,10 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
             || inside(path.dirname(policyFile), target) || inside(target, path.dirname(policyFile))
             || inside(policyPaths().store, target) || inside(target, policyPaths().store)) throw new Error('Unsafe additional workspace directory');
           if (!approvals.select(roots, target)) {
-            await ctx.permission.assert({ sessionID: tool.sessionID, agent: tool.agent, action: 'workspace_approve', resources: [target],
-              metadata: { sessionID: tool.sessionID, reason: input.reason ?? '', approvedDirectories: roots }, source: source(tool) });
+            await ctx.permission.assert({
+              sessionID: tool.sessionID, agent: tool.agent, action: 'workspace_approve', resources: [target],
+              metadata: { sessionID: tool.sessionID, reason: input.reason ?? '', approvedDirectories: roots }, source: source(tool),
+            });
             if (fs.realpathSync(requested) !== target) throw new Error('Requested directory changed during approval');
             approvals.approve(tool.sessionID, target);
           }
@@ -220,8 +322,8 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
       });
       editor.add({
         name: 'sandbox_shell',
-        description: 'Execute terminal commands in the trusted workspace using bubblewrap. Workspace and private scratch are writable; host filesystem and Git metadata are read-only. No network, host runtime sockets or GPU devices. Use this tool for terminal work; the built-in shell is denied. Retry a sandbox restriction using shell_unsandboxed with a reason; the user must approve. Commands can delete workspace files. Read-only agents receive a read-only workspace.',
-        input: inputSchema, options: { codemode: false },
+        description: 'Execute terminal commands in the trusted workspace using bubblewrap. Workspace and private scratch are writable; host filesystem and Git metadata are read-only. No network, host runtime sockets or GPU devices. Use background: true for long builds, test suites, or dev servers, then monitor with sandbox_job. Truncated output saves the full log in scratch for read/grep. Retry a sandbox restriction using shell_unsandboxed with a reason; the user must approve.',
+        input: sandboxShellSchema, options: { codemode: false },
         execute: async (input, tool) => {
           const policy = loadPolicy(policyFile); const access = agentAccess(policy, tool.agent);
           if (!access.shell) throw new Error('Agent terminal access is denied by kit policy');
@@ -231,18 +333,54 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
             const cwd = fs.realpathSync(path.resolve(directory, input.workdir ?? directory));
             const workspace = approvals.select(approvals.read(tool.sessionID), cwd);
             if (!workspace) throw new Error('Directory is outside this session’s approved workspaces. Request workspace_approve for the exact directory before continuing.');
-            return toolResult(restrictionHint(await runSandbox({
+            const common = {
               workspace, cwd, command: input.command,
               timeout: input.timeout, signal: tool.signal,
               readOnly: access.profile !== 'workspace-write',
               writablePaths: access.planningRoots,
               scratchRoot: policy.scratchRoot,
+              nativeTempRoot,
               protectedPaths: [path.dirname(policyFile), policyPaths().store],
               maskedPaths: [path.dirname(policyFile), policyPaths().state],
-            }), access));
+            };
+            if (input.background) {
+              const started = await jobs.start({ ...common, sessionID: tool.sessionID, access });
+              if (!started.background) return toolResult(restrictionHint(started.result, access));
+              const { background: _bg, ...metadata } = started;
+              return {
+                content: `Job ${started.job_id} started in background.\nLog: ${started.log_path}\nUse sandbox_job (status/wait/cancel) or inspect the log with read/grep.`,
+                metadata,
+              };
+            }
+            return toolResult(restrictionHint(await runSandbox(common), access));
           } catch (error) {
             return toolResult({ content: error.message, exit_code: 125, truncated: false });
           }
+        },
+      });
+      editor.add({
+        name: 'sandbox_job',
+        description: 'Inspect, wait for, list, or cancel background sandbox_shell jobs started in this session.',
+        input: jobSchema, options: { codemode: false },
+        execute: async (input, tool) => {
+          const policy = loadPolicy(policyFile); const access = agentAccess(policy, tool.agent);
+          if (!access.shell) throw new Error('Agent terminal access is denied by kit policy');
+          await ctx.permission.assert({
+            sessionID: tool.sessionID, agent: tool.agent, action: 'sandbox_job',
+            resources: [input.job_id ?? input.action], metadata: { action: input.action }, source: source(tool),
+          });
+          if (input.action === 'list') {
+            const items = jobs.list(tool.sessionID);
+            const content = items.length
+              ? items.map(j => `${j.job_id}  ${j.status}${Number.isInteger(j.exit_code) ? ' (exit ' + j.exit_code + ')' : ''}  ${j.elapsed_ms}ms  ${j.log_path}  ${j.command}`).join('\n')
+              : 'No background sandbox jobs in this session.';
+            return { content, metadata: { jobs: items } };
+          }
+          if (!input.job_id) throw new Error('job_id is required for ' + input.action);
+          if (input.action === 'status') return formatJobSummary(jobs.status(tool.sessionID, input.job_id), access);
+          if (input.action === 'wait') return formatJobSummary(await jobs.wait(tool.sessionID, input.job_id, { waitMs: input.wait_ms, signal: tool.signal }), access);
+          if (input.action === 'cancel') return formatJobSummary(await jobs.cancel(tool.sessionID, input.job_id), access);
+          throw new Error('Unknown sandbox_job action: ' + input.action);
         },
       });
       editor.add({
@@ -262,6 +400,11 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         },
       });
     });
+    return async () => {
+      closed = true;
+      try { await eventIterator?.return?.(); } catch { /* ignore */ }
+      await jobs.close();
+    };
   },
 }; }
 

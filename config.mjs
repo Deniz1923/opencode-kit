@@ -95,13 +95,16 @@ export function migrateConfig(input, { home = os.homedir(), pluginPath = INSTALL
       }
       additions.push({ action: 'edit', resource: profile.scratchRoot + '/**', effect: 'allow' });
     }
-    if (!access.shell) additions.push({ action: 'sandbox_shell', resource: '*', effect: 'deny' });
+    if (!access.shell) {
+      additions.push({ action: 'sandbox_shell', resource: '*', effect: 'deny' }, { action: 'sandbox_job', resource: '*', effect: 'deny' });
+    }
     if (access.escape === 'deny') additions.push({ action: 'shell_unsandboxed', resource: '*', effect: 'deny' });
     agent.permissions = enforce(agent.permissions, additions); out.agents[id] = agent;
   }
   const additions = [
     { action: 'shell', resource: '*', effect: 'deny' },
     { action: 'sandbox_shell', resource: '*', effect: 'allow' },
+    { action: 'sandbox_job', resource: '*', effect: 'allow' },
     { action: 'shell_unsandboxed', resource: '*', effect: 'ask' },
     { action: 'external_directory', resource: '*', effect: 'ask' },
     { action: 'external_directory', resource: profile.scratchRoot + '/*', effect: 'allow' },

@@ -112,3 +112,13 @@ test('project configuration cannot introduce host MCP processes', () => {
   const c=migrateConfig({},opts);
   assert.ok(c.policies.some(r=>r.action==='integration.use' && r.resource==='mcp:*' && r.effect==='deny'));
 });
+
+test('migration allows sandbox_job globally and mirrors shell denial onto sandbox_job', () => {
+  const c = migrateConfig({
+    agents: {
+      'strict/reviewer': { mode: 'subagent', permissions: [{ action: 'shell', resource: '*', effect: 'deny' }] },
+    },
+  }, opts);
+  assert.ok(c.permissions.some(r => r.action === 'sandbox_job' && r.resource === '*' && r.effect === 'allow'));
+  assert.ok(c.agents['strict/reviewer'].permissions.some(r => r.action === 'sandbox_job' && r.resource === '*' && r.effect === 'deny'));
+});
