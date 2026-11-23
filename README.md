@@ -140,9 +140,19 @@ access or unsandboxed execution.
 
 Native tools can read under host `/tmp` without an additional directory approval.
 Workspace-write agents can also edit ordinary files under `/tmp/opencode` when
-that directory belongs to the OpenCode user and other users cannot write to it.
+that directory belongs to the OpenCode user and other users cannot write to it,
+and `sandbox_shell` bridges that same directory inside the sandbox while keeping
+host `/tmp` isolated and hiding other workspaces' scratch directories and locks.
 Existing file denials, agent profiles, and project scratch write rules still
-apply. Shell commands continue to use their isolated `/tmp`.
+apply.
+
+Long builds, test suites, or local servers can pass `background: true` to
+`sandbox_shell` and monitor or cancel them with `sandbox_job` (`list`, `status`,
+`wait`, `cancel`) without blocking concurrent commands or read-only subagents.
+When foreground output is truncated, the full combined log (up to 10 MiB) is
+saved under the workspace's private scratch log directory so the agent can
+inspect it with `read` or `grep` instead of re-running the command. Host-side
+coordination leases are PID-tracked and self-recover after process crashes.
 
 ## Chat without coding overhead
 

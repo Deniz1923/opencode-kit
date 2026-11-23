@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { planInstall, listInstalled } from './install.mjs';
 import { loadPolicy } from '../policy.mjs';
-import { runSandbox } from '../sandbox.mjs';
+import { runSandbox, inspectScratchHealth } from '../sandbox.mjs';
 
 export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3', '2.2.4', '2.3.2'], bwrap: ['0.13.1'] };
 export const supportedPlatform = (platform = process.platform, arch = process.arch) => platform === 'linux' && arch === 'x64';
@@ -52,6 +52,10 @@ export async function doctor(paths, { execute = true } = {}) {
     const plan = planInstall(paths, {});
     check('managed settings and code', !plan.conflicts.length, plan.conflicts.length ? 'Managed settings changed; review an update preview' : 'Native shell hard policy and managed settings match the installation');
   } catch (e) { check('managed settings and code', false, e.message); }
+  if (policy) {
+    const scratch = inspectScratchHealth(policy.scratchRoot);
+    check('scratch and locks', scratch.ok, scratch.detail);
+  }
   if (execute && policy) {
     // /tmp is intentionally private/writable inside bwrap. Use a host-visible
     // parent so the outside-write check exercises a read-only host mount.

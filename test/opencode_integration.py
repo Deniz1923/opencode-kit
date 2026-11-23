@@ -740,6 +740,105 @@ class AgentIntegration(unittest.TestCase):
         context, prompts = self.finish(self.begin(), decision='once')
         self.assertFalse(marker.exists(), json.dumps(context)[-3000:]); self.assertFalse(prompts)
 
+    def test_background_job_runs_concurrently_and_supports_sandbox_job_lifecycle(self):
+        self.config()
+        state = {'step': 0, 'job_id': None}
+
+        def reply(body):
+            messages = body['messages']
+            if 'Reply with only the title.' in str(messages):
+                return 'Background test'
+            if state['step'] == 0:
+                state['step'] = 1
+                return 'sandbox_shell', {'command': 'printf BG_ONE\\n; sleep 1.4; printf BG_TWO\\n; touch bg-finished', 'background': True}
+            if state['step'] == 1:
+                tool_text = str(messages[-1].get('content', ''))
+                match = re.search(r'(job_[a-f0-9]+)', tool_text)
+                if not match:
+                    return 'NO_JOB_ID: ' + tool_text
+                state['job_id'] = match.group(1)
+                state['step'] = 2
+                return 'sandbox_shell', {'command': 'printf CONCURRENT_OK'}
+            if state['step'] == 2:
+                state['step'] = 3
+                return 'sandbox_job', {'action': 'wait', 'job_id': state['job_id'], 'wait_ms': 5000}
+            return 'BG_LIFECYCLE_DONE'
+
+        self.model.reply = reply
+        context, _ = self.finish(self.begin())
+        text = json.dumps(context)
+        self.assertIn('BG_LIFECYCLE_DONE', text)
+        self.assertIn('CONCURRENT_OK', text)
+        self.assertIn('BG_TWO', text)
+        self.assertTrue((self.project / 'bg-finished').exists())
+
+    def test_truncated_foreground_shell_saves_log_readable_by_native_read(self):
+        self.config()
+        state = {'step': 0}
+
+        def reply(body):
+            messages = body['messages']
+            if 'Reply with only the title.' in str(messages):
+                return 'Log spillover test'
+            if state['step'] == 0:
+                state['step'] = 1
+                return 'sandbox_shell', {'command': 'seq 1 2500'}
+            if state['step'] == 1:
+                tool_text = str(messages[-1].get('content', ''))
+                match = re.search(r'full output saved to ([^\s;\]]+)', tool_text)
+                if not match:
+                    return 'NO_LOG_PATH: ' + tool_text
+                state['step'] = 2
+                return 'read', {'path': match.group(1), 'offset': 1230, 'limit': 10}
+            return 'LOG_READ_OK'
+
+        self.model.reply = reply
+        context, prompts = self.finish(self.begin(), decision='reject')
+        text = json.dumps(context)
+        self.assertIn('LOG_READ_OK', text)
+        self.assertIn('1234', text)
+        self.assertFalse(prompts)
+
+    def test_project_config_native_write_prompts_ask_and_blocks_during_active_background_placeholder(self):
+        self.config()
+        state = {'step': 0, 'job_id': None}
+
+        def reply(body):
+            messages = body['messages']
+            if 'Reply with only the title.' in str(messages):
+                return 'Config ask test'
+            if state['step'] == 0:
+                state['step'] = 1
+                return 'sandbox_shell', {'command': 'sleep 5', 'background': True}
+            if state['step'] == 1:
+                match = re.search(r'(job_[a-f0-9]+)', str(messages[-1].get('content', '')))
+                state['job_id'] = match.group(1) if match else None
+                state['step'] = 2
+                return 'write', {'path': str(self.project / 'opencode.json'), 'content': '{"ok":true}\n'}
+            if state['step'] == 2:
+                state['step'] = 3
+                return 'sandbox_job', {'action': 'cancel', 'job_id': state['job_id']}
+            if state['step'] == 3:
+                state['step'] = 4
+                return 'write', {'path': str(self.project / 'opencode.json'), 'content': '{"ok":true}\n'}
+            return 'CONFIG_ASK_DONE'
+
+        self.model.reply = reply
+        context, prompts = self.finish(self.begin(), decision='once')
+        text = json.dumps(context)
+        self.assertIn('CONFIG_ASK_DONE', text)
+        self.assertIn('sandbox_job', text)
+        self.assertTrue(any(p['action'] == 'edit' for p in prompts), prompts)
+        self.assertEqual((self.project / 'opencode.json').read_text(), '{"ok":true}\n')
+
+    def test_sandbox_job_is_denied_for_terminal_denied_agent(self):
+        self.config(agent='foreign/reviewer', terminal=False)
+        self.model.tool = 'sandbox_job'
+        self.model.arguments = {'action': 'list'}
+        context, prompts = self.finish(self.begin(), decision='once')
+        self.assertFalse(prompts)
+        self.assertNotIn('No background sandbox jobs', json.dumps(context))
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

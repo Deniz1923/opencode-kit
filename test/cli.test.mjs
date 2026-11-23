@@ -6,6 +6,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { supportedPlatform } from '../cli.mjs';
+import { policyPaths } from '../policy.mjs';
+import { planInstall, applyPlan } from '../kit/install.mjs';
+import { doctor } from '../kit/doctor.mjs';
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-cli-')); t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -97,4 +100,22 @@ test('unsupported OpenCode permits previews and removal without changing survivi
   r = run('remove', 'usage', '--apply');
   assert.equal(r.status, 0, r.stderr);
   assert.match(run('recover').stdout, /Recovery complete/);
+});
+
+test('doctor reports stale scratch locks as self-recovering and fails on unsafe scratch permissions', async t => {
+  const { home } = fixture(t);
+  const paths = policyPaths(home, { XDG_CONFIG_HOME: home + '/.config', XDG_DATA_HOME: home + '/.local/share', OPENCODE_CONFIG_DIR: home + '/.config/opencode' });
+  const scratchRoot = path.join(home, 'scratch');
+  applyPlan(planInstall(paths, { sandbox: true, scratchRoot }));
+  fs.mkdirSync(scratchRoot, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(scratchRoot, 'deadbeef01234567.coord.lock'), JSON.stringify({ pid: 99999999, createdAt: 1 }), { mode: 0o600 });
+  let checks = await doctor(paths, { execute: false });
+  const stale = checks.find(c => c.name === 'scratch and locks');
+  assert.ok(stale, JSON.stringify(checks));
+  assert.equal(stale.okay, true, stale.detail);
+  assert.match(stale.detail, /stale lock/i);
+  fs.chmodSync(scratchRoot, 0o777);
+  checks = await doctor(paths, { execute: false });
+  const unsafe = checks.find(c => c.name === 'scratch and locks');
+  assert.equal(unsafe.okay, false, unsafe.detail);
 });
