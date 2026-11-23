@@ -1,0 +1,120 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { runSandbox, activePlaceholders } from '../sandbox.mjs';
+import { createJobManager } from '../jobs.mjs';
+
+function fixture(t) {
+  const cache = path.join(os.homedir(), '.cache');
+  fs.mkdirSync(cache, { recursive: true });
+  const root = fs.mkdtempSync(path.join(cache, 'oc-jobs-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace');
+  const home = path.join(root, 'home');
+  fs.mkdirSync(workspace); fs.mkdirSync(home);
+  return { root, workspace, cwd: workspace, home, scratchRoot: path.join(root, 'scratch') };
+}
+
+test('fast background command finishes inline within grace window without leaving a running job', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 1000 });
+  t.after(() => jobs.close());
+  const r = await jobs.start({ ...o, sessionID: 'ses_a', command: 'printf fast-done' });
+  assert.equal(r.background, false);
+  assert.equal(r.result.exit_code, 0);
+  assert.equal(r.result.content, 'fast-done');
+  assert.equal(jobs.list('ses_a').length, 0);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+});
+
+test('slow background job detaches, allows concurrent commands, streams log, and finishes via wait', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 120 });
+  t.after(() => jobs.close());
+  const started = await jobs.start({ ...o, sessionID: 'ses_a', command: 'printf step1\\n; sleep 0.5; printf step2\\n; touch bg-done' });
+  assert.equal(started.background, true);
+  assert.equal(started.status, 'running');
+  assert.ok(started.job_id);
+  assert.ok(fs.existsSync(started.log_path));
+  assert.ok(activePlaceholders(o.workspace, o.scratchRoot).length > 0);
+  const concurrent = await runSandbox({ ...o, command: 'printf alongside-ok' });
+  assert.equal(concurrent.exit_code, 0, concurrent.content);
+  assert.equal(concurrent.content, 'alongside-ok');
+  const mid = jobs.status('ses_a', started.job_id);
+  assert.equal(mid.status, 'running');
+  assert.equal(mid.log_path, started.log_path);
+  const done = await jobs.wait('ses_a', started.job_id, { waitMs: 5000 });
+  assert.equal(done.status, 'exited');
+  assert.equal(done.exit_code, 0);
+  assert.ok(fs.existsSync(path.join(o.workspace, 'bg-done')));
+  assert.match(fs.readFileSync(started.log_path, 'utf8'), /step1[\s\S]*step2/);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+});
+
+test('aborting during initial grace window kills job; aborting wait later leaves job running', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 1000 });
+  t.after(() => jobs.close());
+  const ac1 = new AbortController();
+  setTimeout(() => ac1.abort(), 120);
+  const aborted = await jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 2; touch should-not-exist', signal: ac1.signal });
+  assert.equal(aborted.background, false);
+  assert.equal(aborted.result.exit_code, 130);
+  assert.equal(jobs.list('ses_a').length, 0);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+  assert.equal(fs.existsSync(path.join(o.workspace, 'should-not-exist')), false);
+
+  const fastJobs = createJobManager({ graceMs: 100 });
+  t.after(() => fastJobs.close());
+  const started = await fastJobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 0.6; printf survived' });
+  assert.equal(started.background, true);
+  const ac2 = new AbortController();
+  setTimeout(() => ac2.abort(), 80);
+  const partial = await fastJobs.wait('ses_a', started.job_id, { waitMs: 5000, signal: ac2.signal });
+  assert.equal(partial.status, 'running');
+  const finished = await fastJobs.wait('ses_a', started.job_id, { waitMs: 5000 });
+  assert.equal(finished.status, 'exited');
+  assert.match(finished.content, /survived/);
+});
+
+test('cancel kills process group and releases placeholders; timeout caps background runtime', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 80 });
+  t.after(() => jobs.close());
+  await assert.rejects(jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5', timeout: 0 }), /timeout/i);
+  const started = await jobs.start({ ...o, sessionID: 'ses_a', command: '(sleep 2; touch delayed-cancel) & wait' });
+  assert.equal(started.background, true);
+  const cancelled = await jobs.cancel('ses_a', started.job_id);
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.exit_code, 130);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+  const timedOut = await jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5', timeout: 250 });
+  const result = timedOut.background ? await jobs.wait('ses_a', timedOut.job_id, { waitMs: 3000 }) : timedOut.result;
+  assert.equal(result.exit_code, 124);
+  if (timedOut.background) assert.equal(result.status, 'timed_out');
+});
+
+test('jobs are isolated per session, enforce workspace cap, and clean up on session deletion or close', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 60, maxPerWorkspace: 2, maxGlobal: 4 });
+  t.after(() => jobs.close());
+  const j1 = await jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' });
+  const j2 = await jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' });
+  assert.equal(j1.background, true);
+  assert.equal(j2.background, true);
+  await assert.rejects(jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' }), /active background jobs/i);
+  assert.deepEqual(jobs.list('ses_b'), []);
+  assert.throws(() => jobs.status('ses_b', j1.job_id), /not found/i);
+  await assert.rejects(jobs.wait('ses_b', j1.job_id), /not found/i);
+  await assert.rejects(jobs.cancel('ses_b', j1.job_id), /not found/i);
+  await jobs.cleanupSession('ses_a');
+  assert.equal(jobs.status('ses_a', j1.job_id).status, 'cancelled');
+  assert.equal(jobs.status('ses_a', j2.job_id).status, 'cancelled');
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+  const j3 = await jobs.start({ ...o, sessionID: 'ses_b', command: 'sleep 5' });
+  assert.equal(j3.background, true);
+  await jobs.close();
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+});
