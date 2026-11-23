@@ -112,7 +112,7 @@ class AgentIntegration(unittest.TestCase):
         policy_dir = self.root / 'xdg-config/opencode-kit'; policy_dir.mkdir(parents=True, exist_ok=True)
         access = profile or ('planner' if agent == 'plan' else 'read-only' if agent == 'foreign/reviewer' else 'workspace-write')
         policy = {'schemaVersion': 1, 'scratchRoot': str(self.root / 'scratch'), 'agents': {
-            agent: {'profile': access, 'shell': terminal, 'escape': 'ask' if agent == 'build' and terminal else 'deny'}}}
+            agent: {'profile': access, 'shell': terminal, 'escape': 'ask' if agent in ('build', 'chat') and terminal else 'deny'}}}
         policy_file = policy_dir / 'policy.json'; policy_file.write_text(json.dumps(policy)); policy_file.chmod(0o600)
         if not plugin:
             c['plugins'] = []
@@ -852,6 +852,31 @@ class AgentIntegration(unittest.TestCase):
         context, prompts = self.finish(self.begin(), decision='reject')
         self.assertIn('TEMP_BRIDGE_SENTINEL', json.dumps(context))
         self.assertFalse(prompts)
+
+    def test_readonly_reviewer_omits_edit_write_and_escape_tool_schemas(self):
+        self.config(agent='foreign/reviewer')
+        self.finish(self.begin())
+        rev_names = {t['function']['name'] for r in self.model.requests for t in r.get('tools', [])}
+        self.assertIn('sandbox_shell', rev_names)
+        self.assertFalse({'edit', 'write', 'shell_unsandboxed'} & rev_names, rev_names)
+
+    def test_plan_omits_escape_schema_and_gets_sandbox_superpowers_tool_mapping(self):
+        self.config(agent='plan', existing_plugins=[str(ROOT / 'integrations/superpowers')])
+        target = self.host.config / 'opencode.json'; cfg = json.loads(target.read_text())
+        cfg.setdefault('experimental', {})['todo'] = True
+        target.write_text(json.dumps(cfg))
+        self.finish(self.begin('Plan a small refactor.'))
+        plan_reqs = [r for r in self.model.requests if r.get('tools')]
+        self.assertTrue(plan_reqs)
+        plan_names = {t['function']['name'] for t in plan_reqs[0]['tools']}
+        self.assertIn('edit', plan_names)
+        self.assertIn('sandbox_shell', plan_names)
+        self.assertNotIn('shell_unsandboxed', plan_names)
+        sent = json.dumps(plan_reqs[0]['messages'])
+        self.assertIn('sandbox_shell', sent)
+        self.assertIn('sandbox_job', sent)
+        self.assertIn('todowrite', sent)
+        self.assertNotIn('OpenCode v2 has no todo tool', sent)
 
 
 if __name__ == '__main__':

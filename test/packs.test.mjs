@@ -55,3 +55,13 @@ test('host file/env interpolation is rejected in every imported agent field', t 
     assert.throws(() => readAgentPack(root), /interpolation/i);
   }
 });
+
+test('Deniz specialist subagents declare step budgets and background/log guidance', () => {
+  const pack = readAgentPack(path.resolve('packs/deniz-agents'));
+  assert.equal(pack.agents['deniz/explore'].steps, 15);
+  assert.equal(pack.agents['deniz/code-reviewer'].steps, 20);
+  assert.equal(pack.agents['deniz/debugger'].steps, 25);
+  assert.equal(pack.agents['deniz/test-engineer'].steps, 20);
+  assert.match(pack.agents['deniz/debugger'].system, /sandbox_job/);
+  assert.match(pack.agents['deniz/test-engineer'].system, /sandbox_job/);
+});

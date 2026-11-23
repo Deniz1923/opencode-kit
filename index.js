@@ -187,15 +187,36 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         }
         if (guidance.length) event.system.push({ type: 'text', text: 'Subagent handoff: ' + guidance.join(' ') });
       }
-      if (role !== 'chat') return;
-      const rules = await workflowPermissions(ctx, event.agent);
-      const denied = action => deniedAction(rules, action);
-      // Newer hosts may advertise a denied tool. Keep authority in permission
-      // rules and independently omit unavailable workflows from model context.
-      for (const name of Object.keys(event.tools ?? {})) {
-        const workflow = ['skill', 'subagent', 'execute'].includes(name) || name.startsWith('todo') || name.includes('goal');
-        if (workflow && denied(name)) delete event.tools[name];
-        if (/^opencode[_.]/.test(name) && denied('execute')) delete event.tools[name];
+      if (event.tools && typeof event.tools === 'object') {
+        try {
+          const access = agentAccess(loadPolicy(policyFile), event.agent);
+          if (access.escape !== 'ask') delete event.tools.shell_unsandboxed;
+          if (!access.shell) {
+            delete event.tools.sandbox_shell;
+            delete event.tools.sandbox_job;
+          }
+          if (access.profile === 'read-only') {
+            delete event.tools.edit;
+            delete event.tools.write;
+            delete event.tools.patch;
+          }
+        } catch { /* Missing policy still fails closed in permission/execute checks. */ }
+        try {
+          const rules = await workflowPermissions(ctx, event.agent);
+          const denied = action => deniedAction(rules, action);
+          for (const name of ['shell', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed']) {
+            if (name in event.tools && denied(name)) delete event.tools[name];
+          }
+          // Newer hosts may advertise a denied tool. Keep authority in permission
+          // rules and independently omit unavailable workflows from model context.
+          if (role === 'chat') {
+            for (const name of Object.keys(event.tools)) {
+              const workflow = ['skill', 'subagent', 'execute'].includes(name) || name.startsWith('todo') || name.includes('goal');
+              if (workflow && denied(name)) delete event.tools[name];
+              if (/^opencode[_.]/.test(name) && denied('execute')) delete event.tools[name];
+            }
+          }
+        } catch { /* Keep available tools if agent metadata lookup fails. */ }
       }
     });
     // Authority comes from an owned user policy file, never a project's plugin options.

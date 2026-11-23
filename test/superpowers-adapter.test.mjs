@@ -27,12 +27,18 @@ test('upstream producer leaves Chat content and compaction checkpoints untouched
   assert.equal(h.reads(),0);
   assert.ok(h.skills.some(s=>s.id==='brainstorming'));
 });
-test('Build and Plan still receive the original Superpowers bootstrap', async () => {
+test('Build and Plan still receive the Superpowers bootstrap with sandbox-accurate V2 tool mapping', async () => {
   const h=context(); await adapter.setup(h.ctx);
   for (const agent of ['build','plan']) {
-    const e={sessionID:'ses_fixture',agent,messages:[{role:'user',content:[{type:'text',text:'Original request'}]}]};
+    const e={sessionID:'ses_fixture',agent,messages:[{role:'user',content:[{type:'text',text:'Original request'}]}],tools:{sandbox_shell:{},todowrite:{}}};
     await h.hooks.get('context')(e);
-    assert.match(e.messages[0].content[0].text,/You have superpowers/);
+    const injected = e.messages[0].content[0].text;
+    assert.match(injected,/You have superpowers/);
+    assert.match(injected,/sandbox_shell/);
+    assert.match(injected,/sandbox_job/);
+    assert.match(injected,/todowrite/);
+    assert.doesNotMatch(injected,/OpenCode v2 has no todo tool/);
+    assert.doesNotMatch(injected,/Run shell commands → `shell`/);
     assert.equal(e.messages[0].content.at(-1).text,'Original request');
   }
   assert.equal(h.reads(),0);

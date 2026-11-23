@@ -1,6 +1,7 @@
 ---
 {
   "mode": "subagent",
+  "steps": 20,
   "description": "Independently reviews code changes for bugs, regressions, security, and maintainability."
 }
 ---

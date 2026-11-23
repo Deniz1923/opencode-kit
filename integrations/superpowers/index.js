@@ -5,6 +5,29 @@ import { deniedAction, workflowPermissions } from '../../workflow-policy.mjs';
 // their existing workflow unless they deliberately adopt this policy.
 const proportionalWorkflow = 'Use a workflow proportional to the task.';
 
+function adaptToolMapping(event) {
+  const hasTodo = !event.tools || 'todowrite' in event.tools;
+  for (const message of event.messages ?? []) {
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part?.type !== 'text' || typeof part.text !== 'string' || !part.text.includes('**Tool Mapping for OpenCode:**')) continue;
+      let text = part.text
+        .replace(
+          '- Run shell commands → `shell` (`command`, `workdir`, `timeout`, `background`)',
+          '- Run shell commands → `sandbox_shell` (`command`, `workdir`, `timeout`, `background`) and monitor background jobs with `sandbox_job`; use `shell_unsandboxed` only with user approval when a sandbox boundary blocks required access',
+        )
+        .replace('and `shell` for deletion', 'and `sandbox_shell` for deletion');
+      if (hasTodo) {
+        text = text.replace(
+          '- Create or update todos → OpenCode v2 has no todo tool; track the plan in a markdown file (or the harness\'s plan facility) instead',
+          '- Create or update todos → `todowrite` (when enabled; otherwise track the plan in a markdown file)',
+        );
+      }
+      part.text = text;
+    }
+  }
+}
+
 export function createSuperpowersAdapter(plugin) {
   return {
     ...plugin,
@@ -24,7 +47,9 @@ export function createSuperpowersAdapter(plugin) {
                 const rules = await workflowPermissions(ctx, event.agent);
                 if (deniedAction(rules, 'skill') && deniedAction(rules, 'subagent')) return;
               }
-              return callback(event);
+              const result = await callback(event);
+              adaptToolMapping(event);
+              return result;
             }, ...options);
           const value = Reflect.get(target, key, target);
           return typeof value === 'function' ? value.bind(target) : value;

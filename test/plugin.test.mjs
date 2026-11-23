@@ -15,6 +15,7 @@ function host(t, { deny = false, nativeTemp = false } = {}) {
   const policyFile = path.join(root, 'config/policy.json');
   fs.writeFileSync(policyFile, JSON.stringify({schemaVersion:1,scratchRoot:path.join(root,'scratch'),agents:{
     build:{profile:'workspace-write',shell:true,escape:'ask'},
+    chat:{profile:'workspace-write',shell:true,escape:'ask'},
     plan:{profile:'planner',shell:true,escape:'deny'},
     explore:{profile:'read-only',shell:true,escape:'deny'},
     'foreign/reviewer':{profile:'read-only',shell:true,escape:'deny'},
@@ -62,12 +63,27 @@ test('Chat tool cleanup preserves all user and system instructions', async t => 
   assert.deepEqual(event.system, system);
   assert.deepEqual(event.tools, tools); assert.deepEqual(event.options, { maxTokens: 8192 });
 });
-test('workflow cleanup leaves Build and unrelated agents untouched', async t => {
+test('workflow cleanup leaves permitted Build tools untouched and trims policy-denied tools on restricted agents', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
   const hook = h.hooks.get('session:context'); assert.equal(typeof hook, 'function');
-  for (const agent of ['build', 'somebody/researcher']) {
-    const event = chatContext(agent), original = structuredClone(event); await hook(event); assert.deepEqual(event, original);
-  }
+  const buildEvent = chatContext('build'), buildOriginal = structuredClone(buildEvent);
+  await hook(buildEvent);
+  assert.deepEqual(buildEvent, buildOriginal);
+
+  const planEvent = chatContext('plan');
+  planEvent.tools.write = {}; planEvent.tools.patch = {};
+  await hook(planEvent);
+  assert.deepEqual(Object.keys(planEvent.tools).sort(), ['edit', 'patch', 'read', 'sandbox_shell', 'websearch', 'write']);
+
+  const explorerEvent = chatContext('explore');
+  explorerEvent.tools.write = {}; explorerEvent.tools.patch = {};
+  await hook(explorerEvent);
+  assert.deepEqual(Object.keys(explorerEvent.tools).sort(), ['read', 'sandbox_shell', 'websearch']);
+
+  const strictEvent = chatContext('strict/reviewer');
+  strictEvent.tools.sandbox_job = {}; strictEvent.tools.write = {};
+  await hook(strictEvent);
+  assert.deepEqual(Object.keys(strictEvent.tools).sort(), ['read', 'websearch']);
 });
 test('cleanup preserves deliberate skill access, user quotations, and available goal instructions', async t => {
   const h = host(t); await h.plugin.setup(h.ctx);
