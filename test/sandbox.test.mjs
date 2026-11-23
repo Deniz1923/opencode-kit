@@ -428,3 +428,29 @@ test('scanTree traverses sibling subdirectories concurrently and ignores transie
   assert.equal(r.content, 'concurrent-scan-ok');
   assert.ok(maxInFlight > 1, `expected concurrent readdir (>1), got ${maxInFlight}`);
 });
+
+test('inspectScratchHealth rejects a dangling symlink at scratchRoot', t => {
+  const o = fixture(t);
+  const dangling = path.join(o.root, 'dangling-scratch');
+  fs.symlinkSync(path.join(o.root, 'does-not-exist'), dangling);
+  const health = inspectScratchHealth(dangling);
+  assert.equal(health.ok, false, JSON.stringify(health));
+  assert.match(health.detail, /symlink/i);
+});
+
+test('Planner holds shared placeholder lease while concurrent writer exits inside a planning root', async t => {
+  const o = fixture(t);
+  const planDir = path.join(o.workspace, 'docs/superpowers/plans');
+  fs.mkdirSync(planDir, { recursive: true });
+  const writer = await spawnSandbox({ ...o, cwd: planDir, command: 'sleep 0.25' });
+  const planner = await spawnSandbox({ ...o, readOnly: true, writablePaths: ['docs/superpowers/plans'], command: 'sleep 0.5; ! touch docs/superpowers/plans/opencode.json 2>/dev/null; printf planner-ok' });
+  await writer.done;
+  await writer.release();
+  // Planner still runs and holds the placeholder until it finishes.
+  assert.ok(fs.existsSync(path.join(planDir, 'opencode.json')), 'placeholder must stay alive while Planner holds shared lease');
+  const pr = await planner.done;
+  await planner.release();
+  assert.equal(pr.exit_code, 0, pr.content);
+  assert.equal(pr.content, 'planner-ok');
+  assert.equal(fs.existsSync(path.join(planDir, 'opencode.json')), false);
+});

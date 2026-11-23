@@ -136,8 +136,9 @@ async function withCoordLock(scratchRoot, hash, fn) {
         const stat = fs.lstatSync(lock);
         if (stat.isFile() && stat.uid === process.getuid() && !(stat.mode & 0o077)) {
           const parsed = readPrivateJson(lock);
-          if (parsed && !pidAlive(parsed.pid)) { fs.unlinkSync(lock); recovered = true; }
-          else if (!parsed && Date.now() - stat.mtimeMs > 250) { fs.unlinkSync(lock); recovered = true; }
+          if (parsed === undefined) { recovered = true; }
+          else if (parsed && !pidAlive(parsed.pid)) { fs.unlinkSync(lock); recovered = true; }
+          else if (parsed === null && Date.now() - stat.mtimeMs > 250) { fs.unlinkSync(lock); recovered = true; }
         }
       } catch { /* Another process may have already released it. */ }
       if (recovered) continue;
@@ -163,10 +164,10 @@ export function activePlaceholders(workspace, scratchRoot = '/tmp/opencode/sandb
 }
 
 export function inspectScratchHealth(scratchRoot = '/tmp/opencode/sandbox') {
-  if (!fs.existsSync(scratchRoot)) {
+  const stat = fs.lstatSync(scratchRoot, { throwIfNoEntry: false });
+  if (!stat) {
     return { ok: true, staleLocks: 0, staleLeases: 0, activeLeases: 0, detail: 'scratch directory not yet created' };
   }
-  const stat = fs.lstatSync(scratchRoot);
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
     return { ok: false, staleLocks: 0, staleLeases: 0, activeLeases: 0, detail: 'unsafe scratch directory ownership, mode, or symlink: ' + scratchRoot };
   }
@@ -612,6 +613,7 @@ export async function spawnSandbox({
         if (prepared.exit_code !== 0) throw unavailable('planning directory preparation failed: ' + prepared.content);
       } finally { fs.closeSync(prepareFD); }
       const mounts = [];
+      const plannerMeta = new Set();
       for (let i = 0; i < narrowTargets.length; i++) {
         checkRoot(narrow[i]);
         const target = narrowTargets[i];
@@ -619,9 +621,30 @@ export async function spawnSandbox({
         narrowFDs.push(fd);
         if (fs.realpathSync('/proc/self/fd/' + fd) !== target) throw unavailable('planning root changed during setup');
         mounts.push('--bind-fd', String(4 + i), target);
-        const metadata = new Set();
-        await scanTree(target, metadata, null, workspace, cwd);
-        for (const meta of metadata) args.push('--ro-bind', meta, meta);
+        await scanTree(target, plannerMeta, null, workspace, cwd);
+      }
+      if (plannerMeta.size) {
+        await withCoordLock(realScratchRoot, hash, async () => {
+          const leases = readLeases(leasesFile);
+          pruneDeadLeases(leases);
+          const livePlaceholders = new Map();
+          for (const entry of Object.values(leases)) {
+            for (const p of entry.placeholders ?? []) livePlaceholders.set(p.file, p);
+          }
+          const shared = [];
+          for (const meta of plannerMeta) {
+            const st = fs.lstatSync(meta, { throwIfNoEntry: false });
+            if (!st) continue;
+            const tracked = livePlaceholders.get(meta);
+            if (tracked && st.ino === tracked.ino && st.dev === tracked.dev) shared.push(tracked);
+            args.push('--ro-bind', meta, meta);
+          }
+          if (shared.length) {
+            leases[leaseId] = { pid: process.pid, createdAt: Date.now(), placeholders: shared };
+            writeLeases(leasesFile, leases);
+            leaseAcquired = true;
+          }
+        });
       }
       // Protected/credential mounts remain later and therefore authoritative.
       args.splice(narrowPosition, 0, ...mounts);

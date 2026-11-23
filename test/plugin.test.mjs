@@ -501,3 +501,22 @@ test('foreground log rotation never deletes an active background job log', async
   assert.equal(fs.existsSync(activeLog), true, 'active background job log was deleted by foreground rotation');
   await h.tools.get('sandbox_job').execute({ action: 'cancel', job_id: started.metadata.job_id }, h.toolCtx);
 });
+
+test('nested approved workspace checks all matching roots for active background placeholders on project config edit', async t => {
+  const h = host(t);
+  const sub = path.join(h.workspace, 'sub');
+  fs.mkdirSync(sub);
+  // Seed session with both parent and nested child roots (parent listed first).
+  const workspacesDir = path.join(path.dirname(h.policyFile), 'workspaces');
+  fs.mkdirSync(workspacesDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(workspacesDir, 'ses_test.json'), JSON.stringify({ schemaVersion: 1, sessionID: 'ses_test', roots: [h.workspace, sub] }), { mode: 0o600 });
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  const started = await h.tools.get('sandbox_shell').execute({ command: 'sleep 5', workdir: sub, background: true }, h.toolCtx);
+  assert.equal(started.metadata.status, 'running');
+  const blocked = { action: 'edit', effect: 'allow', agent: 'build', sessionID: 'ses_test', resources: [path.join(sub, 'opencode.json')] };
+  await h.hooks.get('evaluate')(blocked);
+  assert.equal(blocked.effect, 'deny');
+  assert.match(blocked.message, /sandbox_job/i);
+  await h.tools.get('sandbox_job').execute({ action: 'cancel', job_id: started.metadata.job_id }, h.toolCtx);
+});

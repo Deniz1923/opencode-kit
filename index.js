@@ -256,10 +256,11 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
               && canEdit(access, target, { workspace: nativeTempRoot, scratch: scratchRoot })) return false;
             if (roots.some(workspace => canEdit(access, target, { workspace, scratch: scratchPath(workspace, scratchRoot) }))) return false;
             if (access.profile === 'workspace-write') {
-              const configRoot = roots.find(workspace => isProjectConfigEdit(target, workspace));
-              if (configRoot) {
-                const placeholders = activePlaceholders(configRoot, scratchRoot);
-                if (placeholders.some(p => inside(target, p) || inside(p, target))) {
+              const configRoots = roots.filter(workspace => isProjectConfigEdit(target, workspace));
+              if (configRoots.length) {
+                const held = configRoots.some(workspace =>
+                  activePlaceholders(workspace, scratchRoot).some(p => inside(target, p) || inside(p, target)));
+                if (held) {
                   blockedByPlaceholder = true;
                   return true;
                 }

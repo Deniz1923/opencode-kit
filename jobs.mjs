@@ -136,7 +136,7 @@ export function createJobManager({
       const settled = handle.done.then(
         async result => {
           finishedResult = result;
-          await handle.release();
+          await handle.release().catch(() => {});
           if (registeredJob) {
             registeredJob.endedAt = Date.now();
             registeredJob.result = result;
@@ -152,7 +152,7 @@ export function createJobManager({
         },
         async error => {
           finishedError = error;
-          await handle.release();
+          await handle.release().catch(() => {});
           if (registeredJob) {
             registeredJob.endedAt = Date.now();
             registeredJob.status = registeredJob.cancelled ? 'cancelled' : 'exited';
