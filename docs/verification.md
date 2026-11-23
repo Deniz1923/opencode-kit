@@ -1,5 +1,8 @@
 # Verification and review
 
+This is the original sandbox rollout record. See the [project handoff](project-handoff.md#verification-record)
+for current kit and Build recovery verification.
+
 Verified on this host: OpenCode v2.1.3, bubblewrap 0.13.1, Node v26.12.1,
 Linux x86-64. Installed globally on 2026-10-25 after Deniz explicitly approved
 applying the tested preview and restarting OpenCode.

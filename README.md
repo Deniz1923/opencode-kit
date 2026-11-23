@@ -8,6 +8,9 @@ Source: [Deniz1923/opencode-kit](https://github.com/Deniz1923/opencode-kit). The
 package is marked private to prevent accidental registry publication; clone the
 repository to install it. License: MIT.
 
+The [project handoff](docs/project-handoff.md) records the current setup,
+verification, and next harness work.
+
 ## Install
 
 The installer targets **Linux x86-64** and requires Git and Node.js 22+.
@@ -361,7 +364,7 @@ Python 3 is required and no model quota is consumed.
 npm test
 npm run test:opencode
 npm pack --ignore-scripts
-npm install --global ./opencode-workspace-sandbox-0.2.0.tgz --ignore-scripts
+npm install --global ./opencode-workspace-sandbox-0.3.1.tgz --ignore-scripts
 opencode-kit init
 ```
 
