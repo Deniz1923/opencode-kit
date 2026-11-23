@@ -390,41 +390,64 @@ function addGitWorktreeMounts(directory, meta, mounts) {
   }
 }
 
-async function scanTree(rootDir, mounts, placeholderDirs, workspace, cwd) {
+async function scanTree(rootDir, mounts, placeholderDirs, workspace, cwd, concurrency = 16) {
   const queue = [rootDir];
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < queue.length) {
-      const directory = queue[cursor++];
-      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-      let hasReserved = false;
-      for (const entry of entries) {
-        if (RESERVED.has(entry.name)) {
-          hasReserved = true;
-          const file = path.join(directory, entry.name);
-          const isLink = entry.isSymbolicLink() || (!entry.isFile() && !entry.isDirectory() && (await fs.promises.lstat(file)).isSymbolicLink());
-          if (isLink) {
-            throw unavailable(entry.name === '.git' ? 'symlinked .git is unsupported' : 'symlinked reserved configuration path: ' + file);
+  let active = 0;
+  let failure = null;
+  await new Promise((resolve, reject) => {
+    const finish = err => {
+      if (err && !failure) { failure = err; reject(err); }
+      else if (!failure && active === 0 && queue.length === 0) resolve();
+    };
+    const pump = () => {
+      while (!failure && active < concurrency && queue.length > 0) {
+        const directory = queue.shift();
+        active++;
+        (async () => {
+          let entries;
+          try {
+            entries = await fs.promises.readdir(directory, { withFileTypes: true });
+          } catch (err) {
+            if (directory !== rootDir && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return;
+            throw err;
           }
-          mounts.add(file);
-          if (entry.name === '.git') addGitWorktreeMounts(directory, file, mounts);
-        } else if (entry.isDirectory()) {
-          queue.push(path.join(directory, entry.name));
-        }
+          let hasReserved = false;
+          for (const entry of entries) {
+            if (RESERVED.has(entry.name)) {
+              hasReserved = true;
+              const file = path.join(directory, entry.name);
+              let isLink = entry.isSymbolicLink();
+              if (!isLink && !entry.isFile() && !entry.isDirectory()) {
+                try { isLink = (await fs.promises.lstat(file)).isSymbolicLink(); }
+                catch (err) { if (err.code === 'ENOENT') continue; throw err; }
+              }
+              if (isLink) {
+                throw unavailable(entry.name === '.git' ? 'symlinked .git is unsupported' : 'symlinked reserved configuration path: ' + file);
+              }
+              mounts.add(file);
+              if (entry.name === '.git') addGitWorktreeMounts(directory, file, mounts);
+            } else if (entry.isDirectory()) {
+              queue.push(path.join(directory, entry.name));
+            }
+          }
+          if (placeholderDirs && (directory === workspace || directory === cwd || hasReserved)) {
+            placeholderDirs.add(directory);
+          }
+        })().then(
+          () => { active--; pump(); finish(); },
+          err => { active--; finish(err); },
+        );
       }
-      if (placeholderDirs && (directory === workspace || directory === cwd || hasReserved)) {
-        placeholderDirs.add(directory);
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: 16 }, worker));
+    };
+    pump();
+  });
 }
 
 export async function spawnSandbox({
   workspace, cwd, command, home = os.homedir(), scratchRoot = '/tmp/opencode/sandbox', nativeTempRoot,
   bwrap = '/usr/bin/bwrap', env = process.env, readOnly = false, writablePaths = [],
   protectedPaths: extraProtected = [], maskedPaths = [], timeout = 120000, signal,
-  logFile, eagerLog = false, pruneLogs = true,
+  logFile, eagerLog = false, pruneLogs = true, activeLogPaths,
 }) {
   if (typeof command !== 'string' || command.includes('\0')) throw unavailable('invalid command');
   workspace = realDir(workspace); home = realDir(home);
@@ -451,6 +474,7 @@ export async function spawnSandbox({
   if (writable && inside(INSTALL_DIR, workspace)) throw unavailable('workspace contains the sandbox implementation');
   privateDir(scratchRoot);
   const realScratchRoot = fs.realpathSync(scratchRoot);
+  if (inside(workspace, realScratchRoot)) throw unavailable('workspace cannot be inside scratchRoot');
   const hash = createHash('sha256').update(workspace).digest('hex').slice(0, 16);
   const scratch = path.join(realScratchRoot, hash);
   const logDir = path.join(realScratchRoot, hash + '.logs');
@@ -500,11 +524,7 @@ export async function spawnSandbox({
     }
     // Mask host-trusted coordination state (locks, leases, logs, sibling scratches),
     // while exposing only this workspace's private scratch directory.
-    if (!inside(workspace, realScratchRoot)) {
-      args.push('--tmpfs', realScratchRoot, '--bind', scratch, scratch, '--remount-ro', realScratchRoot);
-    } else {
-      args.push('--bind', scratch, scratch);
-    }
+    args.push('--tmpfs', realScratchRoot, '--bind', scratch, scratch, '--remount-ro', realScratchRoot);
 
     const narrowPosition = args.length;
     const protectedPaths = new Set();
@@ -644,7 +664,10 @@ exec /bin/bash --noprofile --norc -c "$1"
     };
     const done = proc.done.then(
       async result => {
-        if (pruneLogs && result.log_path) pruneWorkspaceLogs(logDir, new Set(), 32, result.log_path);
+        if (pruneLogs && result.log_path) {
+          const active = typeof activeLogPaths === 'function' ? activeLogPaths(logDir) : (activeLogPaths ?? new Set());
+          pruneWorkspaceLogs(logDir, active, 32, result.log_path);
+        }
         return { ...result, scratch };
       },
       async error => {

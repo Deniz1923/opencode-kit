@@ -390,3 +390,41 @@ test('spawnSandbox exposes a running process handle with active lease until rele
   }
   assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
 });
+
+test('workspace inside scratchRoot is rejected so coordination files cannot be mounted writable', async t => {
+  const o = fixture(t);
+  fs.mkdirSync(o.scratchRoot, { recursive: true, mode: 0o700 });
+  const sub = path.join(o.scratchRoot, 'nested');
+  fs.mkdirSync(sub, { mode: 0o700 });
+  for (const bad of [o.scratchRoot, sub]) {
+    await assert.rejects(runSandbox({ ...o, workspace: bad, command: 'true' }), /scratchRoot/i);
+  }
+});
+
+test('scanTree traverses sibling subdirectories concurrently and ignores transient ENOENT directories', async t => {
+  const o = fixture(t);
+  for (let i = 0; i < 6; i++) fs.mkdirSync(path.join(o.workspace, 'dir-' + i));
+  const vanished = path.join(o.workspace, 'vanished');
+  fs.mkdirSync(vanished);
+  const original = fs.promises.readdir;
+  let inFlight = 0, maxInFlight = 0;
+  fs.promises.readdir = async function(dir, ...args) {
+    if (String(dir) === vanished) {
+      fs.rmSync(vanished, { recursive: true, force: true });
+      const err = new Error('ENOENT'); err.code = 'ENOENT'; throw err;
+    }
+    if (String(dir).startsWith(o.workspace + path.sep)) {
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      try { return await original.call(this, dir, ...args); }
+      finally { inFlight--; }
+    }
+    return original.call(this, dir, ...args);
+  };
+  let r;
+  try { r = await runSandbox({ ...o, command: 'printf concurrent-scan-ok' }); }
+  finally { fs.promises.readdir = original; }
+  assert.equal(r.exit_code, 0, r.content);
+  assert.equal(r.content, 'concurrent-scan-ok');
+  assert.ok(maxInFlight > 1, `expected concurrent readdir (>1), got ${maxInFlight}`);
+});

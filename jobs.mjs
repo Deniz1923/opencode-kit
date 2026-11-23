@@ -20,12 +20,18 @@ export function createJobManager({
   maxBackgroundTimeout = MAX_BG_TIMEOUT,
 } = {}) {
   const jobs = new Map();
+  const inFlight = new Set();
   let startingGlobal = 0;
   const startingByWorkspace = new Map();
   let closed = false;
 
   const activeJobs = () => [...jobs.values()].filter(j => j.status === 'running');
-  const activeLogPaths = logDir => new Set(activeJobs().filter(j => j.logDir === logDir).map(j => j.logPath).filter(Boolean));
+  const activeLogPaths = logDir => {
+    const set = new Set();
+    for (const j of activeJobs()) if (j.logDir === logDir && j.logPath) set.add(j.logPath);
+    for (const f of inFlight) if (f.logDir === logDir && f.logPath) set.add(f.logPath);
+    return set;
+  };
 
   function requireOwned(sessionID, jobID) {
     const job = jobs.get(jobID);
@@ -87,127 +93,151 @@ export function createJobManager({
 
     startingGlobal++;
     startingByWorkspace.set(workspaceKey, (startingByWorkspace.get(workspaceKey) ?? 0) + 1);
-    let handle;
+    const flightController = new AbortController();
+    let resolveFlight;
+    const flight = {
+      sessionID,
+      logDir: null,
+      logPath: null,
+      abort: () => flightController.abort(),
+      done: new Promise(resolve => { resolveFlight = resolve; }),
+    };
+    inFlight.add(flight);
+
+    const releaseReservation = () => {
+      startingGlobal--;
+      const next = (startingByWorkspace.get(workspaceKey) ?? 1) - 1;
+      if (next <= 0) startingByWorkspace.delete(workspaceKey); else startingByWorkspace.set(workspaceKey, next);
+      inFlight.delete(flight);
+      resolveFlight();
+    };
+
     try {
-      if (signal?.aborted) return { background: false, result: { content: '[cancelled]', exit_code: 130, truncated: false } };
-      handle = await spawnSandbox({
+      if (closed || flightController.signal.aborted || signal?.aborted) {
+        return { background: false, result: { content: '[cancelled]', exit_code: 130, truncated: false } };
+      }
+      const handle = await spawnSandbox({
         ...options,
         timeout: effectiveTimeout,
         signal: undefined,
         eagerLog: true,
         pruneLogs: false,
       });
-    } finally {
-      startingGlobal--;
-      const next = (startingByWorkspace.get(workspaceKey) ?? 1) - 1;
-      if (next <= 0) startingByWorkspace.delete(workspaceKey); else startingByWorkspace.set(workspaceKey, next);
-    }
+      flight.logDir = handle.logDir;
+      flight.logPath = handle.logPath();
 
-    const startedAt = Date.now();
-    const id = 'job_' + randomUUID().slice(0, 8);
-    let finishedResult = null;
-    let finishedError = null;
-    let abortedDuringGrace = false;
-    let registeredJob = null;
+      const startedAt = Date.now();
+      const id = 'job_' + randomUUID().slice(0, 8);
+      let finishedResult = null;
+      let finishedError = null;
+      let abortedDuringGrace = false;
+      let registeredJob = null;
 
-    const settled = handle.done.then(
-      async result => {
-        finishedResult = result;
-        await handle.release();
-        if (registeredJob) {
-          registeredJob.endedAt = Date.now();
-          registeredJob.result = result;
-          registeredJob.status = registeredJob.cancelled
-            ? 'cancelled'
-            : result.exit_code === 124
-              ? 'timed_out'
-              : 'exited';
-          pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, result.log_path);
-          pruneCompleted(sessionID);
-        }
-        return result;
-      },
-      async error => {
-        finishedError = error;
-        await handle.release();
-        if (registeredJob) {
-          registeredJob.endedAt = Date.now();
-          registeredJob.status = registeredJob.cancelled ? 'cancelled' : 'exited';
-          registeredJob.result = { content: error.message, exit_code: 125, truncated: false, log_path: handle.logPath() };
-          pruneCompleted(sessionID);
-        }
-        return null;
-      },
-    );
+      const settled = handle.done.then(
+        async result => {
+          finishedResult = result;
+          await handle.release();
+          if (registeredJob) {
+            registeredJob.endedAt = Date.now();
+            registeredJob.result = result;
+            registeredJob.status = registeredJob.cancelled
+              ? 'cancelled'
+              : result.exit_code === 124
+                ? 'timed_out'
+                : 'exited';
+            pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, result.log_path);
+            pruneCompleted(sessionID);
+          }
+          return result;
+        },
+        async error => {
+          finishedError = error;
+          await handle.release();
+          if (registeredJob) {
+            registeredJob.endedAt = Date.now();
+            registeredJob.status = registeredJob.cancelled ? 'cancelled' : 'exited';
+            registeredJob.result = { content: error.message, exit_code: 125, truncated: false, log_path: handle.logPath() };
+            pruneCompleted(sessionID);
+          }
+          return null;
+        },
+      );
 
-    const onGraceAbort = () => {
-      abortedDuringGrace = true;
-      handle.kill(130);
-    };
-    signal?.addEventListener('abort', onGraceAbort, { once: true });
-    let graceTimer;
-    const gracePromise = new Promise(resolve => { graceTimer = setTimeout(() => resolve('grace'), graceMs); });
-    const winner = await Promise.race([settled.then(() => 'done'), gracePromise]);
-    clearTimeout(graceTimer);
-    signal?.removeEventListener('abort', onGraceAbort);
-
-    if (winner === 'done' || abortedDuringGrace || signal?.aborted) {
-      if (winner !== 'done') {
+      const onGraceAbort = () => {
+        abortedDuringGrace = true;
         handle.kill(130);
+      };
+      if (closed || flightController.signal.aborted || signal?.aborted) {
+        onGraceAbort();
+      }
+      signal?.addEventListener('abort', onGraceAbort, { once: true });
+      flightController.signal.addEventListener('abort', onGraceAbort, { once: true });
+      let graceTimer;
+      const gracePromise = new Promise(resolve => { graceTimer = setTimeout(() => resolve('grace'), graceMs); });
+      const winner = abortedDuringGrace ? 'abort' : await Promise.race([settled.then(() => 'done'), gracePromise]);
+      clearTimeout(graceTimer);
+      signal?.removeEventListener('abort', onGraceAbort);
+      flightController.signal.removeEventListener('abort', onGraceAbort);
+
+      if (winner === 'done' || abortedDuringGrace || closed || flightController.signal.aborted || signal?.aborted) {
+        if (winner !== 'done') {
+          handle.kill(130);
+          await settled;
+        }
+        if (finishedError) throw finishedError;
+        const result = { ...finishedResult };
+        if (!result.truncated && result.log_path) {
+          try { fs.unlinkSync(result.log_path); } catch { /* ignore */ }
+          delete result.log_path;
+        } else if (result.log_path) {
+          pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, result.log_path);
+        }
+        return { background: false, result };
+      }
+
+      const job = {
+        id,
+        sessionID,
+        command: commandPreview(options.command),
+        workspace: handle.workspace,
+        cwd: handle.cwd,
+        logDir: handle.logDir,
+        logPath: handle.logPath(),
+        startedAt,
+        endedAt: null,
+        status: 'running',
+        cancelled: false,
+        access: options.access,
+        result: null,
+        handle,
+        settled,
+      };
+      registeredJob = job;
+      jobs.set(id, job);
+
+      if (finishedResult || finishedError) {
         await settled;
+        if (!job.endedAt) {
+          job.endedAt = Date.now();
+          job.result = finishedResult ?? { content: finishedError.message, exit_code: 125, truncated: false, log_path: job.logPath };
+          job.status = job.result.exit_code === 124 ? 'timed_out' : 'exited';
+        }
+        pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, job.logPath);
+        pruneCompleted(sessionID);
       }
-      if (finishedError) throw finishedError;
-      const result = { ...finishedResult };
-      if (!result.truncated && result.log_path) {
-        try { fs.unlinkSync(result.log_path); } catch { /* ignore */ }
-        delete result.log_path;
-      } else if (result.log_path) {
-        pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, result.log_path);
-      }
-      return { background: false, result };
+
+      return {
+        background: true,
+        job_id: id,
+        status: job.status,
+        log_path: job.logPath,
+        workspace: job.workspace,
+        cwd: job.cwd,
+        command: job.command,
+      };
+    } finally {
+      releaseReservation();
     }
-
-    const job = {
-      id,
-      sessionID,
-      command: commandPreview(options.command),
-      workspace: handle.workspace,
-      cwd: handle.cwd,
-      logDir: handle.logDir,
-      logPath: handle.logPath(),
-      startedAt,
-      endedAt: null,
-      status: 'running',
-      cancelled: false,
-      access: options.access,
-      result: null,
-      handle,
-      settled,
-    };
-    registeredJob = job;
-    jobs.set(id, job);
-
-    // Handle the tiny race where the process finished right as grace timer fired.
-    if (finishedResult || finishedError) {
-      await settled;
-      if (!job.endedAt) {
-        job.endedAt = Date.now();
-        job.result = finishedResult ?? { content: finishedError.message, exit_code: 125, truncated: false, log_path: job.logPath };
-        job.status = job.result.exit_code === 124 ? 'timed_out' : 'exited';
-      }
-      pruneWorkspaceLogs(handle.logDir, activeLogPaths(handle.logDir), 32, job.logPath);
-      pruneCompleted(sessionID);
-    }
-
-    return {
-      background: true,
-      job_id: id,
-      status: job.status,
-      log_path: job.logPath,
-      workspace: job.workspace,
-      cwd: job.cwd,
-      command: job.command,
-    };
   }
 
   function list(sessionID) {
@@ -267,15 +297,19 @@ export function createJobManager({
   }
 
   async function cleanupSession(sessionID) {
+    const pending = [...inFlight].filter(f => f.sessionID === sessionID);
+    for (const f of pending) f.abort();
     const targets = [...jobs.values()].filter(j => j.sessionID === sessionID && j.status === 'running');
-    await Promise.all(targets.map(cancelJob));
+    await Promise.all([...pending.map(f => f.done), ...targets.map(cancelJob)]);
   }
 
   async function close() {
     closed = true;
+    const pending = [...inFlight];
+    for (const f of pending) f.abort();
     const targets = activeJobs();
-    await Promise.all(targets.map(cancelJob));
+    await Promise.all([...pending.map(f => f.done), ...targets.map(cancelJob)]);
   }
 
-  return { start, list, status, wait, cancel, cleanupSession, close };
+  return { start, list, status, wait, cancel, cleanupSession, close, activeLogPaths };
 }

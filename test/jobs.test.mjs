@@ -118,3 +118,38 @@ test('jobs are isolated per session, enforce workspace cap, and clean up on sess
   await jobs.close();
   assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
 });
+
+test('cleanupSession and close abort in-flight start calls during graceMs without leaking jobs or placeholders', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 1000 });
+  t.after(() => jobs.close());
+  const pending1 = jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5; touch leaked-a' });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await jobs.cleanupSession('ses_a');
+  const r1 = await pending1;
+  assert.equal(r1.background, false);
+  assert.equal(r1.result.exit_code, 130);
+  assert.equal(jobs.list('ses_a').length, 0);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+
+  const pending2 = jobs.start({ ...o, sessionID: 'ses_b', command: 'sleep 5; touch leaked-b' });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  await jobs.close();
+  const r2 = await pending2;
+  assert.equal(r2.background, false);
+  assert.equal(r2.result.exit_code, 130);
+  assert.equal(jobs.list('ses_b').length, 0);
+  assert.deepEqual(activePlaceholders(o.workspace, o.scratchRoot), []);
+});
+
+test('maxPerWorkspace cap holds across staggered starts within the graceMs window', async t => {
+  const o = fixture(t);
+  const jobs = createJobManager({ graceMs: 600, maxPerWorkspace: 2, maxGlobal: 4 });
+  t.after(() => jobs.close());
+  const p1 = jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' });
+  const p2 = jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' });
+  await new Promise(resolve => setTimeout(resolve, 120));
+  await assert.rejects(jobs.start({ ...o, sessionID: 'ses_a', command: 'sleep 5' }), /active background jobs/i);
+  await Promise.all([p1, p2]);
+  await jobs.close();
+});

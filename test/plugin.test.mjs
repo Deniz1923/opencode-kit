@@ -466,3 +466,38 @@ test('sandbox_shell background mode, sandbox_job lifecycle, spillover notice, an
   assert.equal(waited.metadata.exit_code, 0);
   assert.match(waited.content, /bg-end/);
 });
+
+test('external_directory never auto-allows root wildcard, bare wildcard, or empty resource; workspace_approve rejects scratchRoot', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  for (const res of ['/*', '*', '']) {
+    const e = { action: 'external_directory', effect: 'ask', agent: 'build', sessionID: 'ses_test', resources: [res] };
+    await h.hooks.get('evaluate')(e);
+    assert.equal(e.effect, 'ask', `resource ${JSON.stringify(res)} must not auto-allow`);
+  }
+  const scratchRoot = path.join(h.root, 'scratch');
+  const nestedScratch = path.join(scratchRoot, 'child');
+  fs.mkdirSync(nestedScratch, { recursive: true, mode: 0o700 });
+  for (const bad of [scratchRoot, nestedScratch]) {
+    await assert.rejects(h.tools.get('workspace_approve').execute({ directory: bad }, h.toolCtx), /unsafe/i);
+  }
+});
+
+test('foreground log rotation never deletes an active background job log', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  const started = await h.tools.get('sandbox_shell').execute({ command: 'printf quiet-bg\\n; sleep 5', background: true }, h.toolCtx);
+  assert.equal(started.metadata.status, 'running');
+  const activeLog = started.metadata.log_path;
+  // Backdate the active job's log so it looks oldest, and seed 35 old logs.
+  const past = new Date(Date.now() - 60000);
+  fs.utimesSync(activeLog, past, past);
+  const logDir = path.dirname(activeLog);
+  for (let i = 0; i < 35; i++) fs.writeFileSync(path.join(logDir, `seed-${String(i).padStart(2, '0')}.log`), 'x', { mode: 0o600 });
+  const spilled = await h.tools.get('sandbox_shell').execute({ command: 'seq 1 2500' }, h.toolCtx);
+  assert.equal(spilled.metadata.exit_code, 0);
+  assert.equal(fs.existsSync(activeLog), true, 'active background job log was deleted by foreground rotation');
+  await h.tools.get('sandbox_job').execute({ action: 'cancel', job_id: started.metadata.job_id }, h.toolCtx);
+});

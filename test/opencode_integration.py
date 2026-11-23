@@ -839,6 +839,20 @@ class AgentIntegration(unittest.TestCase):
         self.assertFalse(prompts)
         self.assertNotIn('No background sandbox jobs', json.dumps(context))
 
+    def test_native_write_under_opencode_temp_is_readable_inside_sandbox_shell(self):
+        self.config()
+        temp_dir = Path('/tmp/opencode')
+        temp_dir.mkdir(mode=0o700, exist_ok=True)
+        temp_file = temp_dir / f'bridge-probe-{self.root.name}.txt'
+        self.addCleanup(temp_file.unlink, missing_ok=True)
+        self.model.steps = [
+            {'tool': 'write', 'arguments': {'path': str(temp_file), 'content': 'TEMP_BRIDGE_SENTINEL'}},
+            {'tool': 'sandbox_shell', 'arguments': {'command': f'cat {str(temp_file)!r}'}},
+        ]
+        context, prompts = self.finish(self.begin(), decision='reject')
+        self.assertIn('TEMP_BRIDGE_SENTINEL', json.dumps(context))
+        self.assertFalse(prompts)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

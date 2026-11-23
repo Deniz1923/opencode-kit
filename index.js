@@ -214,8 +214,12 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         const access = agentAccess(policy, event.agent ?? scope.agent);
         const sensitive = [...privatePaths(), path.dirname(policyFile)].map(canonicalTarget);
         if (event.action === 'external_directory') {
-          const targets = (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory, r.endsWith('/*') ? r.slice(0, -2) : r)));
-          if (targets.length && targets.every(target => !sensitive.some(p => inside(target, p))
+          const targets = (event.resources ?? []).map(r => {
+            if (typeof r !== 'string' || !r || r === '*') return null;
+            const raw = r.endsWith('/*') ? (r.slice(0, -2) || '/') : r;
+            return canonicalTarget(path.resolve(scope.directory, raw));
+          });
+          if (targets.length && targets.every(target => target && !sensitive.some(p => inside(target, p))
             && (inside(target, '/tmp') || scope.roots.some(root => inside(target, root))))) event.effect = 'allow';
         } else if (['read', 'grep', 'glob'].includes(event.action)) {
           const search = event.action !== 'read';
@@ -300,13 +304,15 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         input: { type: 'object', properties: { directory: { type: 'string', description: 'Exact additional directory, absolute or relative to the current session directory.' }, reason: { type: 'string' } }, required: ['directory'], additionalProperties: false },
         options: { codemode: false },
         execute: async (input, tool) => {
-          loadPolicy(policyFile);
+          const policy = loadPolicy(policyFile);
           const { directory } = await sessionScope(tool);
           const requested = path.resolve(directory, input.directory);
           const target = fs.realpathSync(requested);
           const roots = approvals.read(tool.sessionID);
+          const scratchRoot = canonicalTarget(policy.scratchRoot);
           if (!fs.statSync(target).isDirectory() || /[\0\r\n]/.test(target) || inside(os.homedir(), target)
             || ['/', '/tmp', '/run', '/dev', '/dev/shm', '/proc', '/sys'].includes(target)
+            || inside(target, scratchRoot)
             || inside(path.dirname(policyFile), target) || inside(target, path.dirname(policyFile))
             || inside(policyPaths().store, target) || inside(target, policyPaths().store)) throw new Error('Unsafe additional workspace directory');
           if (!approvals.select(roots, target)) {
@@ -340,6 +346,7 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
               writablePaths: access.planningRoots,
               scratchRoot: policy.scratchRoot,
               nativeTempRoot,
+              activeLogPaths: dir => jobs.activeLogPaths(dir),
               protectedPaths: [path.dirname(policyFile), policyPaths().store],
               maskedPaths: [path.dirname(policyFile), policyPaths().state],
             };
