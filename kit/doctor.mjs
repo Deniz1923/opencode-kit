@@ -56,6 +56,16 @@ export async function doctor(paths, { execute = true } = {}) {
     const scratch = inspectScratchHealth(policy.scratchRoot);
     check('scratch and locks', scratch.ok, scratch.detail);
   }
+  const claudeSkillsDir = path.join(paths.home, '.claude', 'skills');
+  const claudeDisabled = ['1', 'true'].includes(String(process.env.OPENCODE_DISABLE_CLAUDE_CODE_SKILLS ?? '').toLowerCase())
+    || ['1', 'true'].includes(String(process.env.OPENCODE_DISABLE_CLAUDE_CODE ?? '').toLowerCase());
+  if (fs.existsSync(claudeSkillsDir)) {
+    check('Claude skill isolation', claudeDisabled, claudeDisabled
+      ? 'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS is active (~/.claude/skills excluded)'
+      : '~/.claude/skills exists and can shadow OpenCode skills with sandbox-blocked paths; set OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 and restart OpenCode');
+  } else {
+    check('Claude skill isolation', true, 'no ~/.claude/skills present');
+  }
   if (execute && policy) {
     // /tmp is intentionally private/writable inside bwrap. Use a host-visible
     // parent so the outside-write check exercises a read-only host mount.

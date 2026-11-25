@@ -583,3 +583,29 @@ test('session:context reminds the model about active or uninspected background j
   await h.hooks.get('session:context')(ctxAfterWait);
   assert.doesNotMatch(ctxAfterWait.system.map(p => p.text).join('\n'), /Active sandbox jobs for this session/);
 });
+
+test('plugin removes private-path skills in skill.transform and gives non-retrying guidance on ~/.claude/skills reads', async t => {
+  const h = host(t);
+  const skills = new Map([
+    ['claude-only', { id: 'claude-only', path: path.join(os.homedir(), '.claude', 'skills', 'claude-only', 'SKILL.md') }],
+    ['managed', { id: 'managed', path: '/tmp/managed-skills/brainstorming/SKILL.md' }],
+  ]);
+  h.ctx.skill = {
+    transform: async fn => fn({
+      list: () => [...skills.values()],
+      remove: id => skills.delete(id),
+    }),
+  };
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+  assert.deepEqual([...skills.keys()], ['managed']);
+
+  const readEvent = {
+    action: 'read', effect: 'allow', agent: 'build', sessionID: 'ses_test',
+    resources: [path.join(os.homedir(), '.claude', 'skills', 'brainstorming', 'SKILL.md')],
+  };
+  await h.hooks.get('evaluate')(readEvent);
+  assert.equal(readEvent.effect, 'deny');
+  assert.match(readEvent.message, /OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1/);
+  assert.match(readEvent.message, /Do not retry/i);
+});

@@ -147,6 +147,19 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
       if (session.parentID && !inherited) throw new Error('Parent session workspace approval is unavailable; open the parent session first.');
       return approvals.seed(sessionID, inherited ?? [initialWorkspace]);
     }
+    if (typeof ctx.skill?.transform === 'function') {
+      try {
+        const sensitiveSkills = [...privatePaths(), path.dirname(policyFile)].map(canonicalTarget);
+        await ctx.skill.transform(draft => {
+          if (typeof draft?.list !== 'function' || typeof draft?.remove !== 'function') return;
+          for (const skill of draft.list()) {
+            if (typeof skill?.path !== 'string' || !path.isAbsolute(skill.path)) continue;
+            const target = canonicalTarget(skill.path);
+            if (sensitiveSkills.some(p => inside(target, p))) draft.remove(skill.id);
+          }
+        });
+      } catch { /* Skill transform unavailable in minimal test hosts. */ }
+    }
     // Store only a bounded candidate from the current outgoing title request.
     // No transcript reads, historical backfill, model retries, or response rewriting.
     const pendingTitles = new Map();
@@ -271,7 +284,12 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
           const targets = search ? [canonicalTarget(path.resolve(scope.directory, event.metadata?.path ?? '.'))]
             : (event.resources ?? []).map(r => canonicalTarget(path.resolve(scope.directory, r)));
           if (!targets.length || targets.some(target => sensitive.some(p => inside(target, p) || (search && inside(p, target))))) {
-            event.effect = 'deny'; event.message = 'Private credentials, configuration and conversation history are protected. Narrow the search to project source, or use sandbox_shell with its private-data masks.';
+            const claudeSkills = canonicalTarget(path.join(os.homedir(), '.claude', 'skills'));
+            const isClaudeSkills = targets.length && targets.some(target => inside(target, claudeSkills));
+            event.effect = 'deny';
+            event.message = isClaudeSkills
+              ? '~/.claude is protected and cannot be read. Do not retry reading ~/.claude/skills; use OpenCode’s own skills instead (set OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 and restart OpenCode to prevent ~/.claude/skills shadowing).'
+              : 'Private credentials, configuration and conversation history are protected. Narrow the search to project source, or use sandbox_shell with its private-data masks.';
           } else if (!search) {
             // Native reads normalize internal paths to relative resources. Check
             // canonical absolute rules too, without recursing on absolute checks.
