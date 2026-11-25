@@ -536,3 +536,50 @@ test('nested approved workspace checks all matching roots for active background 
   assert.match(blocked.message, /sandbox_job/i);
   await h.tools.get('sandbox_job').execute({ action: 'cancel', job_id: started.metadata.job_id }, h.toolCtx);
 });
+
+test('read-only specialist subagents omit todo schemas while keeping skill on-demand; denied subagent/skill tools are stripped', async t => {
+  const h = host(t);
+  h.ctx.agent.get = async ({ agentID }) => {
+    if (agentID === 'explore') return { data: { mode: 'subagent', permissions: [{ action: 'subagent', resource: '*', effect: 'deny' }] } };
+    return { data: { mode: 'primary', permissions: [] } };
+  };
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+
+  const exploreEvent = {
+    sessionID: 'ses_test', agent: 'explore', system: [],
+    tools: { read: {}, edit: {}, write: {}, todowrite: {}, todoread: {}, skill: {}, subagent: {}, sandbox_shell: {}, shell_unsandboxed: {} },
+  };
+  await h.hooks.get('session:context')(exploreEvent);
+  assert.deepEqual(Object.keys(exploreEvent.tools).sort(), ['read', 'sandbox_shell', 'skill']);
+
+  const buildEvent = {
+    sessionID: 'ses_test', agent: 'build', system: [],
+    tools: { read: {}, edit: {}, todowrite: {}, todoread: {}, skill: {}, subagent: {}, sandbox_shell: {}, shell_unsandboxed: {} },
+  };
+  await h.hooks.get('session:context')(buildEvent);
+  assert.ok('todowrite' in buildEvent.tools && 'subagent' in buildEvent.tools && 'skill' in buildEvent.tools);
+});
+
+test('session:context reminds the model about active or uninspected background jobs and clears after wait', async t => {
+  const h = host(t);
+  const teardown = await h.plugin.setup(h.ctx);
+  t.after(() => teardown?.());
+
+  const started = await h.tools.get('sandbox_shell').execute({ command: 'sleep 1.4; printf done-ctx', background: true }, h.toolCtx);
+  assert.equal(started.metadata.status, 'running');
+  const jobId = started.metadata.job_id;
+
+  const ctxRunning = { sessionID: 'ses_test', agent: 'build', system: [], messages: [], tools: {} };
+  await h.hooks.get('session:context')(ctxRunning);
+  const runningNote = ctxRunning.system.map(p => p.text).join('\n');
+  assert.match(runningNote, /Active sandbox jobs for this session/);
+  assert.match(runningNote, new RegExp(jobId));
+  assert.match(runningNote, /running/);
+
+  await h.tools.get('sandbox_job').execute({ action: 'wait', job_id: jobId, wait_ms: 5000 }, h.toolCtx);
+
+  const ctxAfterWait = { sessionID: 'ses_test', agent: 'build', system: [], messages: [], tools: {} };
+  await h.hooks.get('session:context')(ctxAfterWait);
+  assert.doesNotMatch(ctxAfterWait.system.map(p => p.text).join('\n'), /Active sandbox jobs for this session/);
+});

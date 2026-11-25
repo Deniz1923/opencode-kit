@@ -36,15 +36,26 @@ export function createSuperpowersAdapter(plugin) {
         get(target, key) {
           if (key === 'hook') return (name, callback, ...options) => target.hook(name,
             name !== 'context' ? callback : async event => {
-              if (event.agent?.split('/').at(-1) === 'build') {
+              let agentMeta;
+              try {
+                const result = await ctx.agent.get({ agentID: event.agent });
+                agentMeta = result?.data ?? result;
+              } catch { /* Without agent metadata, retain upstream behavior. */ }
+              // Subagents and child sessions receive bounded briefs from their parent;
+              // skip the automatic startup dispatcher while keeping skills on-demand.
+              if (agentMeta?.mode === 'subagent') return;
+              if (event.sessionID && typeof ctx.session?.get === 'function') {
                 try {
-                  const result = await ctx.agent.get({ agentID: event.agent });
-                  const system = (result?.data ?? result)?.system;
-                  if (typeof system === 'string' && system.split('\n').some(line => line.trim() === proportionalWorkflow)) return;
-                } catch { /* Without a confirmed opt-in, retain the upstream callback. */ }
+                  const current = await ctx.session.get({ sessionID: event.sessionID });
+                  if ((current?.data ?? current)?.parentID) return;
+                } catch { /* Ignore if session lookup is unavailable. */ }
+              }
+              if (event.agent?.split('/').at(-1) === 'build') {
+                const system = agentMeta?.system;
+                if (typeof system === 'string' && system.split('\n').some(line => line.trim() === proportionalWorkflow)) return;
               }
               if (event.agent?.split('/').at(-1) === 'chat') {
-                const rules = await workflowPermissions(ctx, event.agent);
+                const rules = agentMeta?.permissions ?? await workflowPermissions(ctx, event.agent);
                 if (deniedAction(rules, 'skill') && deniedAction(rules, 'subagent')) return;
               }
               const result = await callback(event);

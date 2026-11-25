@@ -91,3 +91,24 @@ test('explicitly restoring Chat workflow access restores upstream behavior', asy
   const e={sessionID:'ses_fixture',agent:'chat',messages:[{role:'user',content:[{type:'text',text:'Original request'}]}]};
   await h.hooks.get('context')(e); assert.match(e.messages[0].content[0].text,/You have superpowers/);
 });
+
+test('subagents and child sessions skip automatic Superpowers bootstrap while keeping skills available', async () => {
+  const h = context();
+  h.ctx.agent.get = async ({ agentID }) => ({
+    data: { mode: agentID === 'explore' ? 'subagent' : 'primary', permissions: [] },
+  });
+  await adapter.setup(h.ctx);
+  const sub = { sessionID: 'ses_sub', agent: 'explore', messages: [{ role: 'user', content: [{ type: 'text', text: 'Find auth middleware.' }] }] };
+  const origSub = structuredClone(sub);
+  await h.hooks.get('context')(sub);
+  assert.deepEqual(sub, origSub);
+
+  h.ctx.session.get = async () => ({ id: 'ses_child', parentID: 'ses_parent' });
+  const child = { sessionID: 'ses_child', agent: 'general', messages: [{ role: 'user', content: [{ type: 'text', text: 'Check helper.' }] }] };
+  const origChild = structuredClone(child);
+  await h.hooks.get('context')(child);
+  assert.deepEqual(child, origChild);
+
+  assert.ok(h.skills.some(s => s.id === 'systematic-debugging'));
+  assert.equal(h.reads(), 0);
+});

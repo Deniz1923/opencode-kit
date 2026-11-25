@@ -184,7 +184,7 @@ class AgentIntegration(unittest.TestCase):
         child_started, release_child = threading.Event(), threading.Event()
         self.addCleanup(release_child.set)
         child_requests = []
-        report_start = '<subagent sessionID="'
+        report_pattern = re.compile(r'<(?:subagent|background-result\s+kind="subagent")\s+sessionID="([^"]+)"')
         scenario = f'CHILD_FIXTURE_{state}'
         marker = self.project / 'verified'
 
@@ -203,13 +203,14 @@ class AgentIntegration(unittest.TestCase):
             if newest == 'RETRY_CHILD_FIXTURE':
                 child_requests.append(body)
                 return 'quota'
-            if report_start in newest and 'Quoted example:' not in newest:
+            report_match = report_pattern.search(newest)
+            if report_match and 'Quoted example:' not in newest:
                 if f'state="{state}"' not in newest or 'Subagent handoff:' not in system:
                     return 'HANDOFF_MISSING'
                 if state == 'completed' and 'REVIEW_EVIDENCE: expected value is 42.' not in newest:
                     return 'EVIDENCE_MISSING'
                 if fallback and len(child_requests) == 1:
-                    child = re.search(r'<subagent sessionID="([^"]+)"', newest).group(1)
+                    child = report_match.group(1)
                     return 'subagent', {'agent': 'reader', 'description': 'Retry on approved model',
                                         'prompt': 'RETRY_CHILD_FIXTURE', 'sessionID': child, 'model': 'probe/fallback'}
                 return 'sandbox_shell', {'command': 'printf 42 > verified && test "$(cat verified)" = 42'}
@@ -577,7 +578,7 @@ class AgentIntegration(unittest.TestCase):
             return 'once'
 
         self.model.steps = [
-            {'tool': 'execute', 'arguments': {'code': 'return await tools.opencode.session_move({directory:' + json.dumps(str(second)) + '});'}},
+            {'tool': 'execute', 'arguments': {'code': 'const move = tools.opencode.session?.move ?? tools.opencode.session_move; return await move({directory:' + json.dumps(str(second)) + '});'}},
             {'tool': 'sandbox_shell', 'arguments': {'command': 'touch code-mode-escape'}},
         ]
         sid = self.begin(); context, _ = self.finish(sid, decision=approve_move)
@@ -877,6 +878,29 @@ class AgentIntegration(unittest.TestCase):
         self.assertIn('sandbox_job', sent)
         self.assertIn('todowrite', sent)
         self.assertNotIn('OpenCode v2 has no todo tool', sent)
+
+    def test_readonly_specialist_subagent_skips_superpowers_bootstrap_and_todo_schemas(self):
+        self.config(agent='build', existing_plugins=[str(ROOT / 'integrations/superpowers')])
+        target = self.host.config / 'opencode.json'; cfg = json.loads(target.read_text())
+        cfg.setdefault('experimental', {})['todo'] = True
+        cfg.setdefault('agents', {})['explore'] = {'mode': 'subagent', 'system': 'Explore read-only.'}
+        target.write_text(json.dumps(cfg))
+        policy_file = self.root / 'xdg-config/opencode-kit/policy.json'
+        policy = json.loads(policy_file.read_text())
+        policy['agents']['explore'] = {'profile': 'read-only', 'shell': True, 'escape': 'deny'}
+        policy_file.write_text(json.dumps(policy))
+        self.api('config.get')
+        sid = self.api('session.create', {'location': {'directory': str(self.project)}, 'agent': 'explore'})['data']['id']
+        self.api(f'/api/session/{sid}/prompt', {'text': 'Find main entry point.'})
+        self.finish(sid)
+        sub_reqs = [r for r in self.model.requests if r.get('tools')]
+        self.assertTrue(sub_reqs)
+        sub_names = {t['function']['name'] for t in sub_reqs[0]['tools']}
+        self.assertIn('sandbox_shell', sub_names)
+        self.assertIn('skill', sub_names)
+        self.assertFalse({'edit', 'write', 'shell_unsandboxed', 'todowrite', 'todoread'} & sub_names, sub_names)
+        sent = json.dumps(sub_reqs[0]['messages'])
+        self.assertNotIn('You have superpowers', sent)
 
 
 if __name__ == '__main__':

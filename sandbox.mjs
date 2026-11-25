@@ -217,6 +217,47 @@ function countNewlines(buf) {
   return count;
 }
 
+const FAILURE_LINE = /(?:^|[\s:[({])(?:FAIL(?:ED|URE)?|ERROR|FATAL|PANIC|AssertionError|TypeError|ReferenceError|SyntaxError|RangeError|Exception|Traceback \(most recent call last\)|error\[E\d+\]|error TS\d+|npm ERR!|✖|✗|not ok \d+)/i;
+const MAX_FAILURE_SCAN_BYTES = 2 * 1024 * 1024;
+const MAX_FAILURE_LINES = 25;
+const MAX_FAILURE_BYTES = 3500;
+
+function extractFailureLines(candidateLines, inlineLines) {
+  const inlineSet = new Set(inlineLines.map(line => line.trim()).filter(Boolean));
+  const seen = new Set();
+  const picked = [];
+  let bytes = 0;
+  for (const raw of candidateLines) {
+    const trimmed = raw.trim();
+    if (!trimmed || inlineSet.has(trimmed) || seen.has(trimmed)) continue;
+    if (!FAILURE_LINE.test(trimmed)) continue;
+    seen.add(trimmed);
+    const clipped = trimmed.length > 240 ? trimmed.slice(0, 237) + '...' : trimmed;
+    const cost = Buffer.byteLength(clipped, 'utf8') + 1;
+    if (bytes + cost > MAX_FAILURE_BYTES) break;
+    picked.push(clipped);
+    bytes += cost;
+    if (picked.length >= MAX_FAILURE_LINES) break;
+  }
+  return picked;
+}
+
+function readMiddleLogLines(logPath, headBytes, tailBytes, totalBytes) {
+  if (!logPath || totalBytes <= headBytes + tailBytes) return [];
+  const start = headBytes;
+  const available = Math.max(0, totalBytes - headBytes - tailBytes);
+  const length = Math.min(available, MAX_FAILURE_SCAN_BYTES);
+  if (length <= 0) return [];
+  let fd;
+  try {
+    fd = fs.openSync(logPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const buf = Buffer.allocUnsafe(length);
+    const read = fs.readSync(fd, buf, 0, length, start);
+    return buf.subarray(0, read).toString('utf8').split('\n');
+  } catch { return []; }
+  finally { if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ } }
+}
+
 export function spawnProcess(file, args, {
   cwd, env = process.env, timeout = 120000, signal, extraFD, extraFDs = [],
   logFile, spillLog, maxLogBytes = MAX_LOG_BYTES,
@@ -329,16 +370,28 @@ export function spawnProcess(file, args, {
         : tail.subarray(0, tailSize);
       const lines = byteTruncated ? null : Buffer.concat([opening, ending]).toString('utf8').split('\n');
       const truncated = byteTruncated || lines.length > MAX_INLINE_LINES;
-      let content = truncated
-        ? [
-            ...(lines ?? opening.toString('utf8').split('\n')).slice(0, 400),
-            '[truncated]',
-            ...(lines ?? ending.toString('utf8').split('\n')).slice(-1599),
-          ].join('\n')
-        : lines.join('\n');
+      const exitCode = forced ?? code ?? 128;
+      let content;
+      if (truncated) {
+        const headLines = (lines ?? opening.toString('utf8').split('\n')).slice(0, 400);
+        const tailLines = (lines ?? ending.toString('utf8').split('\n')).slice(-1599);
+        let marker = '[truncated]';
+        if (exitCode !== 0 && exitCode !== 130) {
+          const middleLines = lines
+            ? lines.slice(400, -1599)
+            : readMiddleLogLines(activeLogPath, headSize, tailSize, logBytes);
+          const failures = extractFailureLines(middleLines, [...headLines, ...tailLines]);
+          if (failures.length) {
+            marker = ['[truncated — key failure lines from omitted middle:]', ...failures, '[end key failure lines]'].join('\n');
+          }
+        }
+        content = [...headLines, marker, ...tailLines].join('\n');
+      } else {
+        content = lines.join('\n');
+      }
       if (forced === 124) content += '\n[timeout: process group terminated]';
       if (forced === 130) content += '\n[cancelled]';
-      resolve({ content, exit_code: forced ?? code ?? 128, truncated, ...(activeLogPath ? { log_path: activeLogPath } : {}) });
+      resolve({ content, exit_code: exitCode, truncated, ...(activeLogPath ? { log_path: activeLogPath } : {}) });
     });
   });
   const readRecentTail = () => {

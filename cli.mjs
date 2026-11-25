@@ -27,7 +27,7 @@ Options:
   --agents SOURCE    Include a data-only agent pack (repeatable)
   --namespace NAME   Namespace for an added pack
   --workflow         Include optional todo/delegation preferences
-  --usage            Include the metadata-only /usage-live dashboard (OpenCode 2.2.4 or 2.3.2)
+  --usage            Include the metadata-only /usage-live dashboard (OpenCode 2.2.4, 2.3.2, or 2.4.1)
   --ponytail         Include optional Ponytail 5.3.3 text skills (no hooks)
   --profile ID=ROLE  read-only, planner, or workspace-write (repeatable)
   --escape ID=VALUE  ask or deny (repeatable; explicit denials remain)

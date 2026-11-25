@@ -5,7 +5,7 @@ import { planInstall, listInstalled } from './install.mjs';
 import { loadPolicy } from '../policy.mjs';
 import { runSandbox, inspectScratchHealth } from '../sandbox.mjs';
 
-export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3', '2.2.4', '2.3.2'], bwrap: ['0.13.1'] };
+export const TESTED = { opencode: ['2.1.3', '2.1.4', '2.2.1', '2.2.3', '2.2.4', '2.3.2', '2.4.1'], bwrap: ['0.13.1'] };
 export const supportedPlatform = (platform = process.platform, arch = process.arch) => platform === 'linux' && arch === 'x64';
 function version(command) {
   const r = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 5000 });
@@ -20,7 +20,7 @@ export function checkCompatibility() {
   return result;
 }
 export function checkUsageCompatibility() {
-  const tested = ['2.2.4', '2.3.2'];
+  const tested = ['2.2.4', '2.3.2', '2.4.1'];
   const installed = version('opencode');
   if (!tested.includes(installed)) throw new Error('The usage dashboard requires OpenCode ' + tested.join(' or ') + '; found ' + installed);
   return installed;

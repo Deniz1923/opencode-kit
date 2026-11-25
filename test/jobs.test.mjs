@@ -153,3 +153,32 @@ test('maxPerWorkspace cap holds across staggered starts within the graceMs windo
   await Promise.all([p1, p2]);
   await jobs.close();
 });
+
+test('truncated non-zero sandbox commands surface key failure lines from omitted middle while exit 0 stays clean', async t => {
+  const o = fixture(t);
+  const lineFail = await runSandbox({
+    ...o,
+    command: 'for i in $(seq 1 2600); do if [ "$i" -eq 600 ]; then echo "FAIL src/auth.test.js: AssertionError expected 200"; else echo "ok line $i"; fi; done; exit 1',
+  });
+  assert.equal(lineFail.exit_code, 1);
+  assert.equal(lineFail.truncated, true);
+  assert.match(lineFail.content, /\[truncated — key failure lines from omitted middle:\]/);
+  assert.match(lineFail.content, /FAIL src\/auth\.test\.js: AssertionError expected 200/);
+  assert.ok(lineFail.log_path && fs.existsSync(lineFail.log_path));
+
+  const byteFail = await runSandbox({
+    ...o,
+    command: 'node -e \'const pad = "x".repeat(120); for (let i = 1; i <= 900; i++) console.log(i === 300 ? "error TS2345: Argument of type string is not assignable" : `line ${i} ${pad}`); process.exit(2);\'',
+  });
+  assert.equal(byteFail.exit_code, 2);
+  assert.equal(byteFail.truncated, true);
+  assert.match(byteFail.content, /error TS2345: Argument of type string is not assignable/);
+
+  const okTrunc = await runSandbox({
+    ...o,
+    command: 'for i in $(seq 1 2600); do if [ "$i" -eq 600 ]; then echo "ERROR ignored on exit 0"; else echo "ok line $i"; fi; done',
+  });
+  assert.equal(okTrunc.exit_code, 0);
+  assert.equal(okTrunc.truncated, true);
+  assert.doesNotMatch(okTrunc.content, /key failure lines from omitted middle/);
+});

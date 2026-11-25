@@ -207,6 +207,7 @@ export function createJobManager({
         endedAt: null,
         status: 'running',
         cancelled: false,
+        reported: false,
         access: options.access,
         result: null,
         handle,
@@ -254,14 +255,33 @@ export function createJobManager({
       }));
   }
 
+  function pendingForContext(sessionID, limit = 6) {
+    return [...jobs.values()]
+      .filter(j => j.sessionID === sessionID && (j.status === 'running' || !j.reported))
+      .sort((a, b) => b.startedAt - a.startedAt)
+      .slice(0, limit)
+      .map(j => ({
+        job_id: j.id,
+        status: j.status,
+        exit_code: j.status === 'running' ? undefined : j.result?.exit_code,
+        elapsed_ms: Math.max(0, (j.endedAt ?? Date.now()) - j.startedAt),
+        log_path: j.logPath,
+        command: j.command,
+      }));
+  }
+
   function status(sessionID, jobID) {
     const job = requireOwned(sessionID, jobID);
+    if (job.status !== 'running') job.reported = true;
     return snapshot(job, { includeFull: false });
   }
 
   async function wait(sessionID, jobID, { waitMs = 10000, signal } = {}) {
     const job = requireOwned(sessionID, jobID);
-    if (job.status !== 'running') return snapshot(job, { includeFull: true });
+    if (job.status !== 'running') {
+      job.reported = true;
+      return snapshot(job, { includeFull: true });
+    }
     const duration = Math.max(0, Math.min(Number.isSafeInteger(waitMs) ? waitMs : 10000, MAX_WAIT_MS));
     if (duration > 0 && !signal?.aborted) {
       let timer;
@@ -280,6 +300,7 @@ export function createJobManager({
       clearTimeout(timer);
       if (signal && onAbort) signal.removeEventListener('abort', onAbort);
     }
+    if (job.status !== 'running') job.reported = true;
     return snapshot(job, { includeFull: job.status !== 'running' });
   }
 
@@ -289,6 +310,7 @@ export function createJobManager({
       job.handle.kill(130);
       await job.settled;
     }
+    job.reported = true;
     return snapshot(job, { includeFull: false });
   }
 
@@ -311,5 +333,5 @@ export function createJobManager({
     await Promise.all([...pending.map(f => f.done), ...targets.map(cancelJob)]);
   }
 
-  return { start, list, status, wait, cancel, cleanupSession, close, activeLogPaths };
+  return { start, list, pendingForContext, status, wait, cancel, cleanupSession, close, activeLogPaths };
 }

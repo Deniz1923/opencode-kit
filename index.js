@@ -171,7 +171,8 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
     // capabilities or changes user content, answer style, or model settings.
     await ctx.session.hook('context', async event => {
       // This runs before the model can call a session-moving host utility.
-      if (event.sessionID) await approvedRoots(event.sessionID, await ctx.session.get({ sessionID: event.sessionID }));
+      const session = event.sessionID ? await ctx.session.get({ sessionID: event.sessionID }) : null;
+      if (event.sessionID) await approvedRoots(event.sessionID, session);
       const role = event.agent?.split('/').at(-1);
       if (role === 'build') {
         // Only handle newly delivered OpenCode notices. A user or tool can quote the markup.
@@ -187,9 +188,22 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
         }
         if (guidance.length) event.system.push({ type: 'text', text: 'Subagent handoff: ' + guidance.join(' ') });
       }
+      if (event.sessionID && Array.isArray(event.system)) {
+        const pendingJobs = jobs.pendingForContext(event.sessionID);
+        if (pendingJobs.length) {
+          const lines = pendingJobs.map(j =>
+            `- ${j.job_id} [${j.status}${Number.isInteger(j.exit_code) ? `, exit_code=${j.exit_code}` : ''}, ${j.elapsed_ms}ms] "${j.command}" (log: ${j.log_path})`
+          );
+          event.system.push({
+            type: 'text',
+            text: 'Active sandbox jobs for this session (use sandbox_job to check/wait/cancel; inspect logs with read/grep instead of re-running):\n' + lines.join('\n'),
+          });
+        }
+      }
       if (event.tools && typeof event.tools === 'object') {
+        let access;
         try {
-          const access = agentAccess(loadPolicy(policyFile), event.agent);
+          access = agentAccess(loadPolicy(policyFile), event.agent);
           if (access.escape !== 'ask') delete event.tools.shell_unsandboxed;
           if (!access.shell) {
             delete event.tools.sandbox_shell;
@@ -201,10 +215,20 @@ export function createPlugin({ policyFile = policyPaths().policy, nativeTempRoot
             delete event.tools.patch;
           }
         } catch { /* Missing policy still fails closed in permission/execute checks. */ }
+        let agentMeta;
         try {
-          const rules = await workflowPermissions(ctx, event.agent);
+          const result = await ctx.agent.get({ agentID: event.agent });
+          agentMeta = result?.data ?? result;
+        } catch { /* Keep available tools if agent metadata lookup fails. */ }
+        if (access?.profile === 'read-only' && (agentMeta?.mode === 'subagent' || session?.parentID)) {
+          for (const name of Object.keys(event.tools)) {
+            if (name.startsWith('todo')) delete event.tools[name];
+          }
+        }
+        try {
+          const rules = agentMeta?.permissions ?? await workflowPermissions(ctx, event.agent);
           const denied = action => deniedAction(rules, action);
-          for (const name of ['shell', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed']) {
+          for (const name of ['shell', 'sandbox_shell', 'sandbox_job', 'shell_unsandboxed', 'subagent', 'skill']) {
             if (name in event.tools && denied(name)) delete event.tools[name];
           }
           // Newer hosts may advertise a denied tool. Keep authority in permission
